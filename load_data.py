@@ -15,7 +15,6 @@ from datasets import load_dataset
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOTENV = ".env"
 DATASET_ID = "01gumano1d/batch01-aug"
-# Dataset cache / load directory (in repo)
 DATA_DIR = REPO_ROOT / "data" / "batch01-aug"
 
 load_dotenv(DOTENV)

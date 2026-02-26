@@ -30,7 +30,7 @@ from load_data import load, read_audio, DATA_DIR
 BATCH_SIZE = 8
 LEARNING_RATE = 1e-4
 HEAD_LEARNING_RATE = 1e-3  # Higher LR for new heads
-NUM_EPOCHS = 1
+NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000  # HuBERT requires 16kHz
 
@@ -445,11 +445,28 @@ def main():
     criterion_gender = nn.CrossEntropyLoss(weight=gender_weights.to(DEVICE))
     criterion_age = nn.MSELoss()
     
-    # Training loop
+    # Resume from latest checkpoint if training didn't finish
+    metrics_path = MODEL_DIR / "training_metrics.json"
+    latest_path = MODEL_DIR / "latest_checkpoint.pt"
     best_val_loss = float('inf')
     last_epoch = -1
+    all_metrics = []
+    start_epoch = 0
 
-    for epoch in range(NUM_EPOCHS):
+    if latest_path.exists():
+        ckpt = torch.load(latest_path, map_location=DEVICE, weights_only=False)
+        if (ckpt.get("num_emotions") == num_emotions and ckpt.get("num_genders") == num_genders
+                and ckpt["epoch"] + 1 < NUM_EPOCHS):
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            best_val_loss = ckpt.get("best_val_loss", float("inf"))
+            start_epoch = ckpt["epoch"] + 1
+            if metrics_path.exists():
+                with open(metrics_path) as f:
+                    all_metrics = json.load(f)
+            print(f"Resuming from epoch {start_epoch + 1}/{NUM_EPOCHS} (latest checkpoint)")
+
+    for epoch in range(start_epoch, NUM_EPOCHS):
         if _stop_requested:
             break
         print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
@@ -485,6 +502,17 @@ def main():
               f"Gender Acc: {val_metrics['gender_acc']:.4f}, "
               f"Age MAE: {val_metrics['age_mae']:.2f}")
 
+        # Save metrics for this epoch (JSON-serializable floats)
+        epoch_record = {
+            "epoch": epoch + 1,
+            "train": {k: round(float(v), 6) for k, v in train_metrics.items()},
+            "val": {k: round(float(v), 6) for k, v in val_metrics.items()},
+        }
+        all_metrics.append(epoch_record)
+        with open(metrics_path, "w") as f:
+            json.dump(all_metrics, f, indent=2)
+        print(f"Saved metrics to {metrics_path}")
+
         # Save best model
         if val_metrics['total'] < best_val_loss:
             best_val_loss = val_metrics['total']
@@ -498,6 +526,16 @@ def main():
                 'num_genders': num_genders,
             }, model_path)
             print(f"Saved best model to {model_path}")
+
+        # Save latest checkpoint (for resume; metadata: epoch = completed epoch)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_val_loss': best_val_loss,
+            'num_emotions': num_emotions,
+            'num_genders': num_genders,
+        }, latest_path)
 
     if _stop_requested:
         checkpoint_path = MODEL_DIR / "checkpoint_interrupted.pt"
