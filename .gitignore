@@ -1,0 +1,14 @@
+.env
+models/
+data/
+*.pt
+*.json
+*.log
+*.err
+*.out
+*.log.gz
+*.log.bz2
+*.log.xz
+*.log.lzma
+*.log.zstd
+__pycache__/
