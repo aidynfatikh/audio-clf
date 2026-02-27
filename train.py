@@ -61,7 +61,6 @@ class MultiTaskHubert(nn.Module):
 
     def __init__(self, num_emotions, num_genders, num_ages, freeze_backbone=True):
         super().__init__()
-        # Expose all hidden states so each task can pick its own mix of layers
         self.hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960", output_hidden_states=True,)
 
         if freeze_backbone:
@@ -505,8 +504,9 @@ def main():
     backbone_params = list(model.hubert.parameters())
     head_params = list(model.emotion_head.parameters()) + \
                   list(model.gender_head.parameters()) + \
-                  list(model.age_head.parameters())
-    
+                  list(model.age_head.parameters()) + \
+                  [model.emotion_weights, model.gender_weights, model.age_weights]
+
     optimizer = optim.AdamW([
         {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},  # Lower LR for backbone
         {'params': head_params, 'lr': HEAD_LEARNING_RATE}
@@ -576,10 +576,18 @@ def main():
               f"Age Acc: {val_metrics['age_acc']:.4f}")
 
         # Save metrics for this epoch (JSON-serializable floats)
+        def layer_prefs_tolist(weights):
+            return torch.softmax(weights, dim=0).detach().cpu().tolist()
+
         epoch_record = {
             "epoch": epoch + 1,
             "train": {k: round(float(v), 6) for k, v in train_metrics.items()},
             "val": {k: round(float(v), 6) for k, v in val_metrics.items()},
+            "layer_prefs": {
+                "emotion": [round(x, 6) for x in layer_prefs_tolist(model.emotion_weights)],
+                "gender": [round(x, 6) for x in layer_prefs_tolist(model.gender_weights)],
+                "age": [round(x, 6) for x in layer_prefs_tolist(model.age_weights)],
+            },
         }
         all_metrics.append(epoch_record)
         with open(metrics_path, "w") as f:
