@@ -9,6 +9,7 @@ os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 os.environ["TORCHCODEC_QUIET"] = "1"
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from transformers import Wav2Vec2FeatureExtractor
 from datasets import Audio
@@ -33,10 +34,12 @@ def main():
         encoders = json.load(f)
     emotion_encoder = encoders["emotion"]
     gender_encoder = encoders["gender"]
+    age_encoder = encoders["age"]
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     num_emotions = ckpt["num_emotions"]
     num_genders = ckpt["num_genders"]
+    num_ages = ckpt["num_ages"]
 
     processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
     dataset = load()
@@ -46,26 +49,26 @@ def main():
     if "audio" in split.column_names:
         split = split.cast_column("audio", Audio(decode=False))
 
-    test_ds = AudioDataset(split, processor, emotion_encoder, gender_encoder)
+    test_ds = AudioDataset(split, processor, emotion_encoder, gender_encoder, age_encoder)
     loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
-    model = MultiTaskHubert(num_emotions=num_emotions, num_genders=num_genders, freeze_backbone=True)
+    model = MultiTaskHubert(num_emotions=num_emotions, num_genders=num_genders, num_ages=num_ages, freeze_backbone=True)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model = model.to(DEVICE)
     model.eval()
 
-    emotion_correct = gender_correct = total = 0
-    age_ae = 0.0
+    emotion_correct = gender_correct = age_correct = total = 0
 
     with torch.no_grad():
         for batch in loader:
             out = model(batch["input_values"].to(DEVICE))
-            emotion_logits, gender_logits, age_pred = out
+            emotion_logits, gender_logits, age_logits = out
             emotion_pred = emotion_logits.argmax(dim=1)
             gender_pred = gender_logits.argmax(dim=1)
+            age_pred = age_logits.argmax(dim=1)
             emotion_correct += (emotion_pred == batch["emotion"].to(DEVICE)).sum().item()
             gender_correct += (gender_pred == batch["gender"].to(DEVICE)).sum().item()
-            age_ae += (age_pred.squeeze() - batch["age"].to(DEVICE)).abs().sum().item()
+            age_correct += (age_pred == batch["age"].to(DEVICE)).sum().item()
             total += batch["emotion"].size(0)
 
     n = max(total, 1)
@@ -73,8 +76,13 @@ def main():
         f"Test n={total} | "
         f"Emotion acc: {emotion_correct / n:.4f} | "
         f"Gender acc: {gender_correct / n:.4f} | "
-        f"Age MAE: {age_ae / n:.4f}"
+        f"Age acc: {age_correct / n:.4f}"
     )
+
+    # Inspect learned layer preferences for each task
+    print("Emotion layer prefs:", F.softmax(model.emotion_weights, dim=0))
+    print("Gender layer prefs:", F.softmax(model.gender_weights, dim=0))
+    print("Age layer prefs:",    F.softmax(model.age_weights, dim=0))
 
 
 if __name__ == "__main__":

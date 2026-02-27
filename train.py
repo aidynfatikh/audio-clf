@@ -35,8 +35,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000  # HuBERT requires 16kHz
 
 # Loss weights for multi-task learning
-EMOTION_WEIGHT = 1.0
-GENDER_WEIGHT = 1.0
+EMOTION_WEIGHT = 1.2
+GENDER_WEIGHT = 0.5
 AGE_WEIGHT = 1.0
 
 # Model save directory
@@ -57,52 +57,84 @@ def _sigint_handler(signum, frame):
 
 
 class MultiTaskHubert(nn.Module):
-    """HuBERT model with three heads: emotion, gender, and age."""
-    
-    def __init__(self, num_emotions, num_genders, freeze_backbone=True):
+    """HuBERT model with three heads using task-specific weighted layer sums."""
+
+    def __init__(self, num_emotions, num_genders, num_ages, freeze_backbone=True):
         super().__init__()
-        self.hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960")
-        
-        # Freeze the backbone
+        # Expose all hidden states so each task can pick its own mix of layers
+        self.hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960", output_hidden_states=True,)
+
         if freeze_backbone:
             for param in self.hubert.parameters():
                 param.requires_grad = False
-        
-        hidden_size = 768  # Standard for Hubert-Base
-        
-        # Three separate heads
-        self.emotion_head = nn.Linear(hidden_size, num_emotions)
-        self.gender_head = nn.Linear(hidden_size, num_genders)
-        self.age_head = nn.Linear(hidden_size, 1)  # Regression for age
-    
+
+        hidden_size = 768
+        num_layers = 13  # 12 transformer layers + initial embedding layer
+
+        # Learnable per-task layer weights (before softmax)
+        self.emotion_weights = nn.Parameter(torch.ones(num_layers))
+        self.gender_weights = nn.Parameter(torch.ones(num_layers))
+        self.age_weights = nn.Parameter(torch.ones(num_layers))
+
+        # Slightly deeper heads with non-linearity
+        self.emotion_head = nn.Sequential(
+            nn.Linear(hidden_size, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, num_emotions),
+        )
+        self.gender_head = nn.Sequential(
+            nn.Linear(hidden_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_genders),
+        )
+        self.age_head = nn.Sequential(
+            nn.Linear(hidden_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_ages),
+        )
+
     def forward(self, input_values):
         """
         Args:
             input_values: Audio features [batch_size, sequence_length]
         Returns:
-            emotion_logits, gender_logits, age_prediction
+            emotion_logits, gender_logits, age_logits
         """
         outputs = self.hubert(input_values)
-        
-        # Mean pooling: [batch, time, 768] -> [batch, 768]
-        embeddings = torch.mean(outputs.last_hidden_state, dim=1)
-        
-        emotion_logits = self.emotion_head(embeddings)
-        gender_logits = self.gender_head(embeddings)
-        age_prediction = self.age_head(embeddings)
-        
-        return emotion_logits, gender_logits, age_prediction
+
+        # hidden_states: tuple of 13 tensors [batch, time, hidden]
+        all_layers = torch.stack(outputs.hidden_states)  # [13, B, T, H]
+
+        def weighted_pooled_features(layer_weights: torch.Tensor) -> torch.Tensor:
+            # Softmax over layers so weights sum to 1
+            w = torch.softmax(layer_weights, dim=0)  # [13]
+            # [13, 1, 1, 1] * [13, B, T, H] -> sum over layers -> [B, T, H]
+            weighted = (w.view(-1, 1, 1, 1) * all_layers).sum(dim=0)
+            # Mean-pool over time -> [B, H]
+            return weighted.mean(dim=1)
+
+        emo_feats = weighted_pooled_features(self.emotion_weights)
+        gen_feats = weighted_pooled_features(self.gender_weights)
+        age_feats = weighted_pooled_features(self.age_weights)
+
+        return (
+            self.emotion_head(emo_feats),
+            self.gender_head(gen_feats),
+            self.age_head(age_feats),
+        )
 
 
 class AudioDataset(Dataset):
-    """Dataset for audio classification with emotion, gender, and age labels."""
-    
-    def __init__(self, dataset_split, processor, emotion_encoder, gender_encoder, 
+    """Dataset for audio classification with emotion, gender, and age_category labels."""
+
+    def __init__(self, dataset_split, processor, emotion_encoder, gender_encoder, age_encoder,
                  max_length=160000):  # 10 seconds at 16kHz
         self.data = dataset_split
         self.processor = processor
         self.emotion_encoder = emotion_encoder
         self.gender_encoder = gender_encoder
+        self.age_encoder = age_encoder
         self.max_length = max_length
     
     def __len__(self):
@@ -155,23 +187,30 @@ class AudioDataset(Dataset):
             gender_label = self.gender_encoder.get(gender_normalized, self.gender_encoder['unknown'])
         else:
             gender_label = self.gender_encoder[gender_normalized]
-        age_label = float(row.get('age', 0.0))
-        
+        age_raw = row.get('age_category')
+        age_normalized = age_raw if (age_raw is not None and str(age_raw).strip()) else 'unknown'
+        if 'unknown' in self.age_encoder:
+            age_label = self.age_encoder.get(age_normalized, self.age_encoder['unknown'])
+        else:
+            age_label = self.age_encoder[age_normalized]
+
         return {
             'input_values': input_values,
             'emotion': torch.tensor(emotion_label, dtype=torch.long),
             'gender': torch.tensor(gender_label, dtype=torch.long),
-            'age': torch.tensor(age_label, dtype=torch.float32)
+            'age': torch.tensor(age_label, dtype=torch.long)
         }
 
 
 def build_label_encoders(dataset):
-    """Build label encoders for emotion and gender from the dataset.
+    """Build label encoders for emotion, gender, and age_category from the dataset.
     Adds 'unknown' only if the dataset contains missing/empty labels."""
     emotions = set()
     genders = set()
+    age_categories = set()
     has_missing_emotion = False
     has_missing_gender = False
+    has_missing_age = False
 
     for split_name in dataset.keys():
         split = dataset[split_name]
@@ -185,16 +224,23 @@ def build_label_encoders(dataset):
                 genders.add(str(row['gender']).strip())
             else:
                 has_missing_gender = True
+            if 'age_category' in row and row['age_category'] is not None and str(row['age_category']).strip():
+                age_categories.add(str(row['age_category']).strip())
+            else:
+                has_missing_age = True
 
     emotion_encoder = {label: idx for idx, label in enumerate(sorted(emotions))}
     gender_encoder = {label: idx for idx, label in enumerate(sorted(genders))}
+    age_encoder = {label: idx for idx, label in enumerate(sorted(age_categories))}
 
     if has_missing_emotion:
         emotion_encoder['unknown'] = len(emotion_encoder)
     if has_missing_gender:
         gender_encoder['unknown'] = len(gender_encoder)
+    if has_missing_age:
+        age_encoder['unknown'] = len(age_encoder)
 
-    return emotion_encoder, gender_encoder
+    return emotion_encoder, gender_encoder, age_encoder
 
 
 def compute_class_weights(dataset, label_key, encoder):
@@ -244,23 +290,23 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
         
         optimizer.zero_grad()
         
-        emotion_logits, gender_logits, age_pred = model(input_values)
-        
+        emotion_logits, gender_logits, age_logits = model(input_values)
+
         # Compute losses
         loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
         loss_gender = criterion_gender(gender_logits, gender_labels)
-        loss_age = criterion_age(age_pred.squeeze(), age_labels)
-        
+        loss_age = criterion_age(age_logits, age_labels)
+
         # Combined loss
         total_batch_loss = (
             EMOTION_WEIGHT * loss_emotion +
             GENDER_WEIGHT * loss_gender +
             AGE_WEIGHT * loss_age
         )
-        
+
         total_batch_loss.backward()
         optimizer.step()
-        
+
         total_loss += total_batch_loss.item()
         emotion_loss_sum += loss_emotion.item()
         gender_loss_sum += loss_gender.item()
@@ -289,7 +335,7 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
     
     emotion_correct = 0
     gender_correct = 0
-    age_mae = 0.0
+    age_correct = 0
     total_samples = 0
     num_batches = 0
 
@@ -301,32 +347,33 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
             emotion_labels = batch['emotion'].to(device)
             gender_labels = batch['gender'].to(device)
             age_labels = batch['age'].to(device)
-            
-            emotion_logits, gender_logits, age_pred = model(input_values)
-            
+
+            emotion_logits, gender_logits, age_logits = model(input_values)
+
             # Compute losses
             loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
             loss_gender = criterion_gender(gender_logits, gender_labels)
-            loss_age = criterion_age(age_pred.squeeze(), age_labels)
-            
+            loss_age = criterion_age(age_logits, age_labels)
+
             total_batch_loss = (
                 EMOTION_WEIGHT * loss_emotion +
                 GENDER_WEIGHT * loss_gender +
                 AGE_WEIGHT * loss_age
             )
-            
+
             total_loss += total_batch_loss.item()
             emotion_loss_sum += loss_emotion.item()
             gender_loss_sum += loss_gender.item()
             age_loss_sum += loss_age.item()
-            
+
             # Compute accuracy
             emotion_pred = torch.argmax(emotion_logits, dim=1)
             gender_pred = torch.argmax(gender_logits, dim=1)
-            
+            age_pred = torch.argmax(age_logits, dim=1)
+
             emotion_correct += (emotion_pred == emotion_labels).sum().item()
             gender_correct += (gender_pred == gender_labels).sum().item()
-            age_mae += torch.abs(age_pred.squeeze() - age_labels).sum().item()
+            age_correct += (age_pred == age_labels).sum().item()
             total_samples += emotion_labels.size(0)
             num_batches += 1
 
@@ -341,7 +388,7 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
         'age': age_loss_sum / num_batches,
         'emotion_acc': emotion_correct / total_samples,
         'gender_acc': gender_correct / total_samples,
-        'age_mae': age_mae / total_samples
+        'age_acc': age_correct / total_samples
     }
 
 
@@ -356,19 +403,22 @@ def main():
     
     # Build label encoders
     print("Building label encoders...")
-    emotion_encoder, gender_encoder = build_label_encoders(dataset)
+    emotion_encoder, gender_encoder, age_encoder = build_label_encoders(dataset)
     num_emotions = len(emotion_encoder)
     num_genders = len(gender_encoder)
-    
+    num_ages = len(age_encoder)
+
     print(f"Found {num_emotions} emotion classes: {list(emotion_encoder.keys())}")
     print(f"Found {num_genders} gender classes: {list(gender_encoder.keys())}")
-    
+    print(f"Found {num_ages} age classes: {list(age_encoder.keys())}")
+
     # Save encoders
     encoder_path = MODEL_DIR / "label_encoders.json"
     with open(encoder_path, 'w') as f:
         json.dump({
             'emotion': emotion_encoder,
-            'gender': gender_encoder
+            'gender': gender_encoder,
+            'age': age_encoder
         }, f, indent=2)
     print(f"Saved label encoders to {encoder_path}")
     
@@ -393,15 +443,17 @@ def main():
         train_split,
         processor,
         emotion_encoder,
-        gender_encoder
+        gender_encoder,
+        age_encoder
     )
-    
+
     if val_split is not None:
         val_dataset = AudioDataset(
             val_split,
             processor,
             emotion_encoder,
-            gender_encoder
+            gender_encoder,
+            age_encoder
         )
     else:
         val_dataset = None
@@ -411,6 +463,7 @@ def main():
     # Compute class weights for balanced sampling
     emotion_weights = compute_class_weights(dataset, 'emotion', emotion_encoder)
     gender_weights = compute_class_weights(dataset, 'gender', gender_encoder)
+    age_weights = compute_class_weights(dataset, 'age_category', age_encoder)
     
     # Create weighted sampler (using emotion weights as primary)
     sample_weights = [emotion_weights[train_dataset[i]['emotion'].item()] 
@@ -443,6 +496,7 @@ def main():
     model = MultiTaskHubert(
         num_emotions=num_emotions,
         num_genders=num_genders,
+        num_ages=num_ages,
         freeze_backbone=True
     ).to(DEVICE)
     
@@ -461,7 +515,7 @@ def main():
     # Loss functions
     criterion_emotion = nn.CrossEntropyLoss(weight=emotion_weights.to(DEVICE))
     criterion_gender = nn.CrossEntropyLoss(weight=gender_weights.to(DEVICE))
-    criterion_age = nn.MSELoss()
+    criterion_age = nn.CrossEntropyLoss(weight=age_weights.to(DEVICE))
     
     # Resume from latest checkpoint if training didn't finish
     metrics_path = MODEL_DIR / "training_metrics.json"
@@ -474,6 +528,7 @@ def main():
     if latest_path.exists():
         ckpt = torch.load(latest_path, map_location=DEVICE, weights_only=False)
         if (ckpt.get("num_emotions") == num_emotions and ckpt.get("num_genders") == num_genders
+                and ckpt.get("num_ages") == num_ages
                 and ckpt["epoch"] + 1 < NUM_EPOCHS):
             model.load_state_dict(ckpt["model_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -518,7 +573,7 @@ def main():
               f"Age: {val_metrics['age']:.4f}")
         print(f"Val Metrics - Emotion Acc: {val_metrics['emotion_acc']:.4f}, "
               f"Gender Acc: {val_metrics['gender_acc']:.4f}, "
-              f"Age MAE: {val_metrics['age_mae']:.2f}")
+              f"Age Acc: {val_metrics['age_acc']:.4f}")
 
         # Save metrics for this epoch (JSON-serializable floats)
         epoch_record = {
@@ -542,6 +597,7 @@ def main():
                 'val_loss': best_val_loss,
                 'num_emotions': num_emotions,
                 'num_genders': num_genders,
+                'num_ages': num_ages,
             }, model_path)
             print(f"Saved best model to {model_path}")
 
@@ -553,6 +609,7 @@ def main():
             'best_val_loss': best_val_loss,
             'num_emotions': num_emotions,
             'num_genders': num_genders,
+            'num_ages': num_ages,
         }, latest_path)
 
     if _stop_requested:
@@ -563,6 +620,7 @@ def main():
             'optimizer_state_dict': optimizer.state_dict(),
             'num_emotions': num_emotions,
             'num_genders': num_genders,
+            'num_ages': num_ages,
         }, checkpoint_path)
         print(f"\nStopped by user. Checkpoint saved to {checkpoint_path}")
     else:
