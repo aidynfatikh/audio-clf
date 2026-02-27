@@ -143,8 +143,18 @@ class AudioDataset(Dataset):
         input_values = inputs.input_values.squeeze(0)
         
         # Get labels
-        emotion_label = self.emotion_encoder.get(row.get('emotion', 'unknown'), -1)
-        gender_label = self.gender_encoder.get(row.get('gender', 'unknown'), -1)
+        emotion_raw = row.get('emotion')
+        gender_raw = row.get('gender')
+        emotion_normalized = emotion_raw if (emotion_raw is not None and str(emotion_raw).strip()) else 'unknown'
+        gender_normalized = gender_raw if (gender_raw is not None and str(gender_raw).strip()) else 'unknown'
+        if 'unknown' in self.emotion_encoder:
+            emotion_label = self.emotion_encoder.get(emotion_normalized, self.emotion_encoder['unknown'])
+        else:
+            emotion_label = self.emotion_encoder[emotion_normalized]
+        if 'unknown' in self.gender_encoder:
+            gender_label = self.gender_encoder.get(gender_normalized, self.gender_encoder['unknown'])
+        else:
+            gender_label = self.gender_encoder[gender_normalized]
         age_label = float(row.get('age', 0.0))
         
         return {
@@ -156,29 +166,34 @@ class AudioDataset(Dataset):
 
 
 def build_label_encoders(dataset):
-    """Build label encoders for emotion and gender from the dataset."""
+    """Build label encoders for emotion and gender from the dataset.
+    Adds 'unknown' only if the dataset contains missing/empty labels."""
     emotions = set()
     genders = set()
-    
-    # Collect all unique labels (disable audio decoding to avoid torchcodec)
+    has_missing_emotion = False
+    has_missing_gender = False
+
     for split_name in dataset.keys():
         split = dataset[split_name]
-        # Remove audio decoding by accessing only label columns
         split_no_audio = split.remove_columns(['audio']) if 'audio' in split.column_names else split
         for row in split_no_audio:
-            if 'emotion' in row and row['emotion'] is not None:
-                emotions.add(str(row['emotion']))
-            if 'gender' in row and row['gender'] is not None:
-                genders.add(str(row['gender']))
-    
-    # Create encoders (label -> index)
+            if 'emotion' in row and row['emotion'] is not None and str(row['emotion']).strip():
+                emotions.add(str(row['emotion']).strip())
+            else:
+                has_missing_emotion = True
+            if 'gender' in row and row['gender'] is not None and str(row['gender']).strip():
+                genders.add(str(row['gender']).strip())
+            else:
+                has_missing_gender = True
+
     emotion_encoder = {label: idx for idx, label in enumerate(sorted(emotions))}
     gender_encoder = {label: idx for idx, label in enumerate(sorted(genders))}
-    
-    # Add unknown for missing labels
-    emotion_encoder['unknown'] = len(emotion_encoder)
-    gender_encoder['unknown'] = len(gender_encoder)
-    
+
+    if has_missing_emotion:
+        emotion_encoder['unknown'] = len(emotion_encoder)
+    if has_missing_gender:
+        gender_encoder['unknown'] = len(gender_encoder)
+
     return emotion_encoder, gender_encoder
 
 
@@ -187,11 +202,14 @@ def compute_class_weights(dataset, label_key, encoder):
     labels = []
     for split_name in dataset.keys():
         split = dataset[split_name]
-        # Remove audio decoding to avoid torchcodec
         split_no_audio = split.remove_columns(['audio']) if 'audio' in split.column_names else split
         for row in split_no_audio:
-            label = str(row.get(label_key, 'unknown'))
-            labels.append(encoder.get(label, encoder['unknown']))
+            raw = row.get(label_key)
+            label = raw if (raw is not None and str(raw).strip()) else 'unknown'
+            if 'unknown' in encoder:
+                labels.append(encoder.get(label, encoder['unknown']))
+            else:
+                labels.append(encoder[label])
     
     counter = Counter(labels)
     total = len(labels)
