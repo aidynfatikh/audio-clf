@@ -55,6 +55,26 @@ def load():
     return load_dataset(DATASET_ID, cache_dir=str(DATA_DIR))
 
 
+def get_row(split_name: str = "train", index: int = 0, dataset=None):
+    """Return a single row from the dataset with audio kept as raw bytes/path (not decoded).
+
+    Args:
+        split_name: Dataset split to use (e.g. 'train', 'validation', 'test').
+        index:      Row index within the split.
+        dataset:    Optional pre-loaded DatasetDict. Loaded automatically if None.
+
+    Returns:
+        dict with all columns for the requested row.
+    """
+    from datasets import Audio
+    if dataset is None:
+        dataset = load()
+    split = dataset[split_name]
+    if "audio" in split.column_names:
+        split = split.cast_column("audio", Audio(decode=False))
+    return split[index]
+
+
 if __name__ == "__main__":
     try:
         ds = load()

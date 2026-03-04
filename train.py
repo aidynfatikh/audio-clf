@@ -34,10 +34,18 @@ NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000  # HuBERT requires 16kHz
 
+# ── GPU throughput optimizations (PyTorch 2.x / CUDA 12.x) ──────────────────
+if DEVICE.type == 'cuda':
+    torch.backends.cuda.matmul.allow_tf32 = True   # TF32 matmul (disabled by default)
+    torch.backends.cudnn.benchmark = True           # auto-tune cuDNN kernels
+    torch.set_float32_matmul_precision('high')      # prefer TF32 over full fp32
+
 # Loss weights for multi-task learning
 EMOTION_WEIGHT = 1.2
 GENDER_WEIGHT = 0.5
 AGE_WEIGHT = 1.0
+
+GRAD_CLIP_NORM = 1.0      # max gradient norm for clipping (stabilises mixed-precision training)
 
 # Model save directory
 MODEL_DIR = Path(__file__).resolve().parent / "models"
@@ -47,6 +55,16 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 _stop_requested = False
 
 
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Return the original module, unwrapping torch.compile's OptimizedModule if present.
+
+    torch.compile wraps the model in OptimizedModule, prefixing all state_dict
+    keys with '_orig_mod.'. Always save/load checkpoints via _unwrap() so that
+    saved weights are portable (loadable without torch.compile).
+    """
+    return getattr(model, '_orig_mod', model)
+
+
 def _sigint_handler(signum, frame):
     global _stop_requested
     if _stop_requested:
@@ -54,6 +72,20 @@ def _sigint_handler(signum, frame):
         sys.exit(130)
     _stop_requested = True
     print("\nCtrl+C received. Finishing current batch and saving checkpoint...")
+
+
+def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> torch.Tensor:
+    """Softmax-weighted sum over HuBERT hidden layers, then mean-pool over time.
+
+    Args:
+        all_layers:    [num_layers, B, T, H]  – stacked hidden states
+        layer_weights: [num_layers]           – learnable unnormalised weights
+    Returns:
+        [B, H] pooled features
+    """
+    w = torch.softmax(layer_weights, dim=0)
+    pooled = (w.view(-1, 1, 1, 1) * all_layers).sum(dim=0)  # [B, T, H]
+    return pooled.mean(dim=1)                                # [B, H]
 
 
 class MultiTaskHubert(nn.Module):
@@ -103,19 +135,18 @@ class MultiTaskHubert(nn.Module):
         outputs = self.hubert(input_values)
 
         # hidden_states: tuple of 13 tensors [batch, time, hidden]
-        all_layers = torch.stack(outputs.hidden_states)  # [13, B, T, H]
+        # .clone() gives each layer its own independent storage.
+        # Some transformer residual connections produce hidden states that share
+        # the same underlying storage; torch.compile / dynamo detects these as
+        # "duplicate tensors", triggers re-guards, and hits recompile_limit.
+        # Cloning once here is cheap relative to the rest of the forward pass.
+        all_layers = torch.stack(
+            [h.clone() for h in outputs.hidden_states]
+        )  # [13, B, T, H]
 
-        def weighted_pooled_features(layer_weights: torch.Tensor) -> torch.Tensor:
-            # Softmax over layers so weights sum to 1
-            w = torch.softmax(layer_weights, dim=0)  # [13]
-            # [13, 1, 1, 1] * [13, B, T, H] -> sum over layers -> [B, T, H]
-            weighted = (w.view(-1, 1, 1, 1) * all_layers).sum(dim=0)
-            # Mean-pool over time -> [B, H]
-            return weighted.mean(dim=1)
-
-        emo_feats = weighted_pooled_features(self.emotion_weights)
-        gen_feats = weighted_pooled_features(self.gender_weights)
-        age_feats = weighted_pooled_features(self.age_weights)
+        emo_feats = _weighted_pool(all_layers, self.emotion_weights)
+        gen_feats = _weighted_pool(all_layers, self.gender_weights)
+        age_feats = _weighted_pool(all_layers, self.age_weights)
 
         return (
             self.emotion_head(emo_feats),
@@ -268,7 +299,7 @@ def compute_class_weights(dataset, label_key, encoder):
     return torch.tensor(weights, dtype=torch.float32)
 
 
-def train_epoch(model, dataloader, criterion_emotion, criterion_gender, 
+def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
                 criterion_age, optimizer, device):
     """Train for one epoch. Returns (metrics_dict, was_stopped)."""
     global _stop_requested
@@ -278,32 +309,40 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
     gender_loss_sum = 0.0
     age_loss_sum = 0.0
     num_batches = 0
+    # BF16 autocast — only when the GPU actually supports it
+    _use_bf16 = device.type == 'cuda' and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if _use_bf16 else torch.float32
 
     for batch in tqdm(dataloader, desc="Training"):
         if _stop_requested:
             break
-        input_values = batch['input_values'].to(device)
-        emotion_labels = batch['emotion'].to(device)
-        gender_labels = batch['gender'].to(device)
-        age_labels = batch['age'].to(device)
-        
-        optimizer.zero_grad()
-        
-        emotion_logits, gender_logits, age_logits = model(input_values)
+        # non_blocking=True overlaps H→D transfer with GPU work
+        input_values = batch['input_values'].to(device, non_blocking=True)
+        emotion_labels = batch['emotion'].to(device, non_blocking=True)
+        gender_labels = batch['gender'].to(device, non_blocking=True)
+        age_labels = batch['age'].to(device, non_blocking=True)
 
-        # Compute losses
-        loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
-        loss_gender = criterion_gender(gender_logits, gender_labels)
-        loss_age = criterion_age(age_logits, age_labels)
+        # set_to_none avoids a memset; faster than zeroing
+        optimizer.zero_grad(set_to_none=True)
 
-        # Combined loss
-        total_batch_loss = (
-            EMOTION_WEIGHT * loss_emotion +
-            GENDER_WEIGHT * loss_gender +
-            AGE_WEIGHT * loss_age
-        )
+        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
+            emotion_logits, gender_logits, age_logits = model(input_values)
+
+            # Compute losses
+            loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
+            loss_gender = criterion_gender(gender_logits, gender_labels)
+            loss_age = criterion_age(age_logits, age_labels)
+
+            # Combined loss
+            total_batch_loss = (
+                EMOTION_WEIGHT * loss_emotion +
+                GENDER_WEIGHT * loss_gender +
+                AGE_WEIGHT * loss_age
+            )
 
         total_batch_loss.backward()
+        # Clip gradients before step (guards against spikes in unfrozen layers)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
         optimizer.step()
 
         total_loss += total_batch_loss.item()
@@ -338,27 +377,30 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
     total_samples = 0
     num_batches = 0
 
+    _use_bf16 = device.type == 'cuda' and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if _use_bf16 else torch.float32
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validating"):
             if _stop_requested:
                 break
-            input_values = batch['input_values'].to(device)
-            emotion_labels = batch['emotion'].to(device)
-            gender_labels = batch['gender'].to(device)
-            age_labels = batch['age'].to(device)
+            input_values = batch['input_values'].to(device, non_blocking=True)
+            emotion_labels = batch['emotion'].to(device, non_blocking=True)
+            gender_labels = batch['gender'].to(device, non_blocking=True)
+            age_labels = batch['age'].to(device, non_blocking=True)
 
-            emotion_logits, gender_logits, age_logits = model(input_values)
+            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
+                emotion_logits, gender_logits, age_logits = model(input_values)
 
-            # Compute losses
-            loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
-            loss_gender = criterion_gender(gender_logits, gender_labels)
-            loss_age = criterion_age(age_logits, age_labels)
+                # Compute losses
+                loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
+                loss_gender = criterion_gender(gender_logits, gender_labels)
+                loss_age = criterion_age(age_logits, age_labels)
 
-            total_batch_loss = (
-                EMOTION_WEIGHT * loss_emotion +
-                GENDER_WEIGHT * loss_gender +
-                AGE_WEIGHT * loss_age
-            )
+                total_batch_loss = (
+                    EMOTION_WEIGHT * loss_emotion +
+                    GENDER_WEIGHT * loss_gender +
+                    AGE_WEIGHT * loss_age
+                )
 
             total_loss += total_batch_loss.item()
             emotion_loss_sum += loss_emotion.item()
@@ -474,20 +516,27 @@ def main():
     )
     
     # Create data loaders
+    # persistent_workers keeps worker processes alive between epochs (avoids fork overhead)
+    # prefetch_factor=2 queues 2 batches per worker in advance
+    _pin = DEVICE.type == 'cuda'
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         sampler=sampler,
         num_workers=4,
-        pin_memory=True if DEVICE.type == 'cuda' else False
+        pin_memory=_pin,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
-    
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=4,
-        pin_memory=True if DEVICE.type == 'cuda' else False
+        pin_memory=_pin,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
     
     # Initialize model
@@ -498,25 +547,35 @@ def main():
         num_ages=num_ages,
         freeze_backbone=True
     ).to(DEVICE)
-    
-    # Setup optimizer with different learning rates
-    # Backbone (frozen, but we'll set LR for potential unfreezing later)
-    backbone_params = list(model.hubert.parameters())
-    head_params = list(model.emotion_head.parameters()) + \
-                  list(model.gender_head.parameters()) + \
-                  list(model.age_head.parameters()) + \
-                  [model.emotion_weights, model.gender_weights, model.age_weights]
 
-    optimizer = optim.AdamW([
-        {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},  # Lower LR for backbone
-        {'params': head_params, 'lr': HEAD_LEARNING_RATE}
-    ], weight_decay=0.01)
-    
+    # Collect trainable params
+    backbone_params = list(model.hubert.parameters())
+    head_params = (list(model.emotion_head.parameters()) +
+                   list(model.gender_head.parameters()) +
+                   list(model.age_head.parameters()) +
+                   [model.emotion_weights, model.gender_weights, model.age_weights])
+
+    # fused=True merges the optimizer loop into a single CUDA kernel
+    _fused_opt = DEVICE.type == 'cuda'
+    try:
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
+            {'params': head_params, 'lr': HEAD_LEARNING_RATE}
+        ], weight_decay=0.01, fused=_fused_opt)
+        if _fused_opt:
+            print("  Optimizer: fused AdamW")
+    except (TypeError, RuntimeError):
+        optimizer = optim.AdamW([
+            {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
+            {'params': head_params, 'lr': HEAD_LEARNING_RATE}
+        ], weight_decay=0.01)
+        print("  Optimizer: standard AdamW (fused not available)")
+
     # Loss functions
     criterion_emotion = nn.CrossEntropyLoss(weight=emotion_weights.to(DEVICE))
     criterion_gender = nn.CrossEntropyLoss(weight=gender_weights.to(DEVICE))
     criterion_age = nn.CrossEntropyLoss(weight=age_weights.to(DEVICE))
-    
+
     # Resume from latest checkpoint if training didn't finish
     metrics_path = MODEL_DIR / "training_metrics.json"
     latest_path = MODEL_DIR / "latest_checkpoint.pt"
@@ -539,13 +598,22 @@ def main():
                     all_metrics = json.load(f)
             print(f"Resuming from epoch {start_epoch + 1}/{NUM_EPOCHS} (latest checkpoint)")
 
+    # torch.compile with mode='default' uses TorchInductor kernel fusion.
+    # Graph breaks (e.g. from HuBERT's masking ops) are handled gracefully in
+    # default mode — dynamo compiles the parts it can and runs the rest eagerly.
+    if DEVICE.type == 'cuda' and hasattr(torch, 'compile'):
+        try:
+            print("Compiling model with torch.compile(mode='default')...")
+            model = torch.compile(model, mode='default', dynamic=False)
+        except Exception as e:
+            print(f"  torch.compile unavailable ({e}), running eager.")
+
     for epoch in range(start_epoch, NUM_EPOCHS):
         if _stop_requested:
             break
         print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
         print("-" * 50)
 
-        # Train
         train_metrics, stopped = train_epoch(
             model, train_loader, criterion_emotion, criterion_gender,
             criterion_age, optimizer, DEVICE
@@ -584,9 +652,9 @@ def main():
             "train": {k: round(float(v), 6) for k, v in train_metrics.items()},
             "val": {k: round(float(v), 6) for k, v in val_metrics.items()},
             "layer_prefs": {
-                "emotion": [round(x, 6) for x in layer_prefs_tolist(model.emotion_weights)],
-                "gender": [round(x, 6) for x in layer_prefs_tolist(model.gender_weights)],
-                "age": [round(x, 6) for x in layer_prefs_tolist(model.age_weights)],
+                "emotion": [round(x, 6) for x in layer_prefs_tolist(_unwrap(model).emotion_weights)],
+                "gender": [round(x, 6) for x in layer_prefs_tolist(_unwrap(model).gender_weights)],
+                "age": [round(x, 6) for x in layer_prefs_tolist(_unwrap(model).age_weights)],
             },
         }
         all_metrics.append(epoch_record)
@@ -600,7 +668,7 @@ def main():
             model_path = MODEL_DIR / "best_model.pt"
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': _unwrap(model).state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': best_val_loss,
                 'num_emotions': num_emotions,
@@ -612,7 +680,7 @@ def main():
         # Save latest checkpoint (for resume; metadata: epoch = completed epoch)
         torch.save({
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': _unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'best_val_loss': best_val_loss,
             'num_emotions': num_emotions,
@@ -624,7 +692,7 @@ def main():
         checkpoint_path = MODEL_DIR / "checkpoint_interrupted.pt"
         torch.save({
             'epoch': last_epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': _unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'num_emotions': num_emotions,
             'num_genders': num_genders,
