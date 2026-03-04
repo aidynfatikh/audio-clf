@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import re
 import wave
 from pathlib import Path
@@ -30,39 +29,33 @@ OUTPUT_FORMAT = "pcm_16000"
 # Lower stability = more creative/expressive (0.35); higher = more monotone
 STABILITY_CREATIVE = 0.0
 SAMPLE_RATE = 16000
-# Manual (gender, age) -> (voice_id, name) from all_voices.csv so we never default to Rachel.
-# F senior: no female/old in CSV → Serena (F, middle_aged). M child / F child: young + fitting style.
+# (gender, age) -> (voice_id, name). Only young, adult, senior (no child voices).
 VOICE_BY_GENDER_AGE = {
-    ("F", "senior"): ("pMsXgVXv3BLzUgSXRplE", "Serena"),   # F middle_aged (no F+old)
-    ("F", "young"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),      # F young
-    ("F", "adult"): ("9BWtsMINqrJLrRacOk9x", "Aria"),     # F middle_aged
-    ("M", "child"): ("bVMeCyTHy58xNoL34h3p", "Jeremy"),    # M child
+    ("F", "senior"): ("pMsXgVXv3BLzUgSXRplE", "Serena"),
+    ("F", "young"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),
+    ("F", "adult"): ("9BWtsMINqrJLrRacOk9x", "Aria"),
     ("M", "young"): ("CYw3kZ02Hs0563khs1Fj", "Dave"),
-    ("M", "adult"): ("29vD33N1CtxCmqQRPOHJ", "Drew"),     # M middle_aged
-    ("M", "senior"): ("D38z5RcWu1voky8WS1ja", "Fin"),     # M old
+    ("M", "adult"): ("29vD33N1CtxCmqQRPOHJ", "Drew"),
+    ("M", "senior"): ("D38z5RcWu1voky8WS1ja", "Fin"),
 }
-# F child: random choice of Gigi or Mimi per line
-F_CHILD_VOICES = [
-    ("jBpfuIE2acCO8z3wKNLl", "Gigi"),
-    ("zrHiDhphv9ZnVXBqCLjz", "Mimi"),
-]
 
-# (gender, emotion) -> (voice_id, name) for better expression. From all_voices by description.
+# (gender, emotion) -> (voice_id, name). Jeff: gloomy/sad; Pete: angry M; Ivanna: disgust F; Kannada: surprised M.
 VOICE_BY_GENDER_EMOTION = {
-    ("F", "neutral"): ("LcfcDJNUP1GQjkzn1xUU", "Emily"),      # calm
-    ("M", "neutral"): ("onwK4e9ZLuTAKqWW03F9", "Daniel"),     # Steady Broadcaster
-    ("F", "happy"): ("cgSgspJ2msm6clMCkdW9", "Jessica"),      # Playful, Bright
-    ("M", "happy"): ("bVMeCyTHy58xNoL34h3p", "Jeremy"),       # excited
-    ("F", "sad"): ("MF3mGyEYCl7XYWbV9V6O", "Elli"),           # emotional
-    ("M", "sad"): ("JBFqnCBsd6RMkjVDRZzb", "George"),         # Warm
-    ("F", "angry"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),         # strong
-    ("M", "angry"): ("2EiwWnXFnvU5JabPnv8n", "Clyde"),        # intense
-    ("F", "fearful"): ("piTKgcLEGmPE4e6mEKli", "Nicole"),     # soft
-    ("M", "fearful"): ("GBv7mTt0atIp3Br8iCZE", "Thomas"),     # meditative
-    ("F", "surprised"): ("jsCqWAovK2LkecY7zXl4", "Freya"),    # expressive
-    ("M", "surprised"): ("IKne3meq5aSn9XLyUdCD", "Charlie"),  # Energetic
-    ("F", "disgusted"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),     # strong
-    ("M", "disgusted"): ("t0jbNlBVZ17f02VDIeMI", "Jessie"),   # raspy
+    ("F", "neutral"): ("LcfcDJNUP1GQjkzn1xUU", "Emily"),
+    ("M", "neutral"): ("onwK4e9ZLuTAKqWW03F9", "Daniel"),
+    ("F", "happy"): ("cgSgspJ2msm6clMCkdW9", "Jessica"),
+    ("M", "happy"): ("CYw3kZ02Hs0563khs1Fj", "Dave"),
+    ("F", "sad"): ("MF3mGyEYCl7XYWbV9V6O", "Elli"),
+    ("M", "sad"): ("k9073AMdU5sAUtPMH1il", "Jeff"),         # Gloomy, Poetic and Sad
+    ("M", "gloomy"): ("k9073AMdU5sAUtPMH1il", "Jeff"),
+    ("F", "angry"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),
+    ("M", "angry"): ("ChO6kqkVouUn0s7HMunx", "Pete"),
+    ("F", "fearful"): ("piTKgcLEGmPE4e6mEKli", "Nicole"),
+    ("M", "fearful"): ("GBv7mTt0atIp3Br8iCZE", "Thomas"),
+    ("F", "surprised"): ("jsCqWAovK2LkecY7zXl4", "Freya"),
+    ("M", "surprised"): ("dzooKAnqL8jJ27zWCzUq", "Kannada"),  # Surprised and Paranoid
+    ("F", "disgusted"): ("gE0owC0H9C8SzfDyIUtB", "Ivanna"),   # Sassy, Condescending
+    ("M", "disgusted"): ("t0jbNlBVZ17f02VDIeMI", "Jessie"),
 }
 
 
@@ -123,9 +116,9 @@ def pick_voice_for(voices, gender: str, age: str, emotion: str = "") -> tuple[st
         em_key = (gender, emotion.strip().lower())
         if em_key in VOICE_BY_GENDER_EMOTION:
             return VOICE_BY_GENDER_EMOTION[em_key]
-    key = (gender, age)
-    if key == ("F", "child"):
-        return random.choice(F_CHILD_VOICES)
+    # No child voices: map child -> young for age-based lookup
+    age_key = "young" if age == "child" else age
+    key = (gender, age_key)
     if key in VOICE_BY_GENDER_AGE:
         return VOICE_BY_GENDER_AGE[key]
     g = "female" if gender == "F" else "male"

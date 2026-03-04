@@ -1,62 +1,7 @@
-M,child,neutral: Үстелде тыныш қана сурет салып отырмын [calm].  
-F,child,neutral: Сабақтан кейін дәптерлерімді реттеп қойдым [steady tone].  
-M,young,neutral: Аялдамада автобусты күтіп тұрмын [neutral].  
-F,young,neutral: Досыма қысқа хабарлама жазып отырмын [calm].  
-M,adult,neutral: Кешкі жиналысқа дайындық жүріп жатыр [even tone].  
-F,adult,neutral: Ас үйде кешкі ас әзірленіп жатыр [neutral].  
-M,senior,neutral: Терезе жанында тыныш отырмын [soft breath].  
-F,senior,neutral: Бақшадағы гүлдерді суарып шықтым [calm].  
-
-M,child,happy: Сыйлық алып [smiles], қатты қуанып тұрмын [laugh]!  
-F,child,happy: Жаңа ойыншықты көріп [giggles], орнымда секіріп кеттім [excited]!  
-M,young,happy: Көптен күткен нәтиже шығып [relieved smile], ерекше шаттандым [bright voice]!  
-F,young,happy: Достармен кездесу керемет өтті [laugh], көңіл күй көтерілді [smiles]!  
-M,adult,happy: Еңбектің жемісін көріп [deep smile], шынайы риза болдым [warm tone].  
-F,adult,happy: Жақсы жаңалық естіп [smiles], жүрек жеңілдеп кетті [soft laugh].  
-M,senior,happy: Немеренің жетістігін естіп [gentle smile], көңіл марқайып қалды [warm tone].  
-F,senior,happy: Отбасымен жиналған сәтте [smiles softly], жүрек қуанышқа толды [light laugh].  
-
-M,child,sad: Ойыншық жоғалып кетті [sniff], көңіл түсіп тұр [quiet voice].  
-F,child,sad: Жақын досым сөйлеспей қойды [sad sigh], ішім пысып тұр [soft sniff].  
-M,young,sad: Жоспар іске аспай қалды [sigh], көңілде өкініш бар [low tone].  
-F,young,sad: Сенім артқан адам көңілді қалдырды [pause], ауыр сезім кетпей тұр [shaky voice].  
-M,adult,sad: Көп күш жұмсалған іс бағаланбай қалды [deep sigh], көңіл құлазыды [low voice].  
-F,adult,sad: Үй ішіндегі тыныштық тым ауыр сезіледі [long sigh], жан жабырқады [soft tone].  
-M,senior,sad: Ескі суреттерге қарап отырмын [slow breath], жүрек сыздайды [tremble].  
-F,senior,sad: Өткен күндер еске түсіп кетті [pause], көзге жас келеді [soft sigh].  
-
-M,child,angry: Затымды рұқсатсыз алып кеткеніне [raised voice], ашу келіп тұр [frown]!  
-F,child,angry: Әділетсіз сөз айтылды [upset tone], қатты ренжіп тұрмын [angry breath]!  
-M,young,angry: Берілген уәде орындалмады [tense voice], бұл жағдай ашуландырды [sharp tone].  
-F,young,angry: Еңбегім ескерілмей қалды [firm tone], ыза кернеп тұр [clenched jaw].  
-M,adult,angry: Жауапсыз әрекетке куә болдым [cold tone], шыдам таусылды [controlled anger].  
-F,adult,angry: Өтірік айтылғанын білдім [hard pause], бұл мүлде қабылданбайды [strict tone].  
-M,senior,angry: Құрметсіздік байқалды [stern voice], мұндайға төзу қиын [firm breath].  
-F,senior,angry: Тәртіпсіздік көзге ұрып тұр [sharp tone], көңіл ашулы [tight voice].  
-
-M,child,fearful: Қараңғы бөлме тым қорқынышты [whisper], жүрек қатты соғып тұр [fast breath].  
-F,child,fearful: Қатты дыбыс шықты [gasp], денем дір ете қалды [shaky voice].  
-M,young,fearful: Маңызды сәт жақындап қалды [tense breath], қобалжу күшейіп барады [low voice].  
-F,young,fearful: Нәтиже белгісіз болып тұр [worried tone], алаңдау басым [uneasy breath].  
-M,adult,fearful: Болашаққа қатысты ойлар мазалайды [quiet sigh], белгісіздік ауыр [tense tone].  
-F,adult,fearful: Күтпеген жағдай болуы мүмкін [concerned voice], іште үрей бар [tight breath].  
-M,senior,fearful: Денсаулық жайлы ойлар тыныштық бермейді [slow breath], алаңдау сезіледі [weak tone].  
-F,senior,fearful: Жаман хабар естуден қорқу бар [tremble], жүрек мазасыз [soft whisper].  
-
-M,child,disgusted: Ащы дәрінің дәмі ұнамады [grimace], ішу қиын [displeased tone].  
-F,child,disgusted: Бүлінген тағамды көріп [yuck], тәбет қашып кетті [face twist].  
-M,young,disgusted: Әділетсіз іс байқалды [disapproving tone], жиіркеніш пайда болды [cold breath].  
-F,young,disgusted: Өтірік сөз естілді [sharp exhale], ішкі қарсылық туды [frown].  
-M,adult,disgusted: Әдепсіз әрекетке куә болдым [stern tone], жағымсыз әсер қалды [grim tone].  
-F,adult,disgusted: Немқұрайлық анық сезілді [disappointed sigh], қабылдау қиын [tight voice].  
-M,senior,disgusted: Қадірсіз мінез көрінді [low disapproval], көңілге жақпады [slow shake].  
-F,senior,disgusted: Адамгершілікке жат қылық байқалды [cold tone], жиіркеніш тудырды [firm breath].  
-
-M,child,surprised: Мұндайды алғаш рет көріп тұрмын [gasp]!  
-F,child,surprised: Бұлай болады деп күтпедім [wide eyes]!  
-M,young,surprised: Бұл жаңалық шынымен таңғалдырды [sudden pause]!  
-F,young,surprised: Күтпеген шешім болды [sharp inhale], таңырқап тұрмын [raised tone]!  
-M,adult,surprised: Нәтиже ойлағаннан өзгеше шықты [pause], таң қалдырды [soft exhale].  
-F,adult,surprised: Осындай хабар тосын болды [gasp], сену қиын [bright tone].  
-M,senior,surprised: Мұндай жағдай сирек кездеседі екен [slow inhale], шынымен таңырқатуда.  
-F,senior,surprised: Көргенім күтпеген болды [soft gasp], жүрек дүрсілдеп кетті [light tremble].  w
+M,young,sad: [very sad and gloomy] Бүгін үйге жалғыз қайтатын болдым…
+F,child,happy: [very happy and excited] Жаңа ойыншықты көріп қатты қуанып тұрмын!
+M,adult,angry: [angry and sharp tone] Жұмыс жоспарлары тағы өзгеріп кетті.
+F,young,fearful: [scared and nervous] Қараңғы көшеде жалғыз жүруге аздап қорқамын.
+M,child,surprised: [very surprised and loud] Досым маған күтпеген сыйлық берді!
+F,adult,neutral: [calm and steady voice] Үстел үстіндегі қағаздарды реттеп қойдым.
+M,young,disgusted: [disgusted and cold tone] Асханадан шыққан иіс ұнамады.
