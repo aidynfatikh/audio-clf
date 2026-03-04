@@ -5,30 +5,36 @@ import os
 import signal
 import sys
 import warnings
+import logging
 
 # Disable torchcodec and use soundfile for audio decoding
 os.environ['DATASETS_AUDIO_BACKEND'] = 'soundfile'
 os.environ['TORCHCODEC_QUIET'] = '1'
+# Uncomment to silence "Not enough SMs to use max_autotune_gemm" on smaller GPUs:
+os.environ['TORCHINDUCTOR_MAX_AUTOTUNE'] = '0'
 warnings.filterwarnings('ignore', category=UserWarning)
+# Suppress torch.compile recompile/duplicate-tensor and inductor max_autotune messages
+warnings.filterwarnings('ignore', module='torch._dynamo')
+warnings.filterwarnings('ignore', module='torch._inductor.utils')
+# Suppress dynamo logger in case it uses logging for the same messages
+logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader
 from transformers import HubertModel, Wav2Vec2FeatureExtractor
 from datasets import Audio
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import json
-from collections import Counter
 
 # Import load_data (warnings already suppressed in load_data.py)
 from load_data import load, read_audio, DATA_DIR
 
 # Configuration
 BATCH_SIZE = 8
-LEARNING_RATE = 1e-4
 HEAD_LEARNING_RATE = 1e-3  # Higher LR for new heads
 NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -134,14 +140,12 @@ class MultiTaskHubert(nn.Module):
         """
         outputs = self.hubert(input_values)
 
-        # hidden_states: tuple of 13 tensors [batch, time, hidden]
-        # .clone() gives each layer its own independent storage.
-        # Some transformer residual connections produce hidden states that share
-        # the same underlying storage; torch.compile / dynamo detects these as
-        # "duplicate tensors", triggers re-guards, and hits recompile_limit.
-        # Cloning once here is cheap relative to the rest of the forward pass.
+        # hidden_states: tuple of 13 tensors [batch, time, hidden].
+        # HuggingFace often returns views that share storage (residual connections).
+        # torch.compile/dynamo treats them as "duplicate tensors" and recompiles repeatedly.
+        # .detach().clone() breaks the alias so dynamo sees 13 independent tensors.
         all_layers = torch.stack(
-            [h.clone() for h in outputs.hidden_states]
+            [h.detach().clone() for h in outputs.hidden_states]
         )  # [13, B, T, H]
 
         emo_feats = _weighted_pool(all_layers, self.emotion_weights)
@@ -206,19 +210,24 @@ class AudioDataset(Dataset):
         
         # Get labels
         emotion_raw = row.get('emotion')
-        gender_raw = row.get('gender')
         emotion_normalized = emotion_raw if (emotion_raw is not None and str(emotion_raw).strip()) else 'unknown'
+
+        gender_raw = row.get('gender')
         gender_normalized = gender_raw if (gender_raw is not None and str(gender_raw).strip()) else 'unknown'
+
+        age_raw = row.get('age_category')
+        age_normalized = age_raw if (age_raw is not None and str(age_raw).strip()) else 'unknown'
+
         if 'unknown' in self.emotion_encoder:
             emotion_label = self.emotion_encoder.get(emotion_normalized, self.emotion_encoder['unknown'])
         else:
             emotion_label = self.emotion_encoder[emotion_normalized]
+
         if 'unknown' in self.gender_encoder:
             gender_label = self.gender_encoder.get(gender_normalized, self.gender_encoder['unknown'])
         else:
             gender_label = self.gender_encoder[gender_normalized]
-        age_raw = row.get('age_category')
-        age_normalized = age_raw if (age_raw is not None and str(age_raw).strip()) else 'unknown'
+
         if 'unknown' in self.age_encoder:
             age_label = self.age_encoder.get(age_normalized, self.age_encoder['unknown'])
         else:
@@ -273,32 +282,6 @@ def build_label_encoders(dataset):
     return emotion_encoder, gender_encoder, age_encoder
 
 
-def compute_class_weights(dataset, label_key, encoder):
-    """Compute class weights for balanced sampling."""
-    labels = []
-    for split_name in dataset.keys():
-        split = dataset[split_name]
-        split_no_audio = split.remove_columns(['audio']) if 'audio' in split.column_names else split
-        for row in split_no_audio:
-            raw = row.get(label_key)
-            label = raw if (raw is not None and str(raw).strip()) else 'unknown'
-            if 'unknown' in encoder:
-                labels.append(encoder.get(label, encoder['unknown']))
-            else:
-                labels.append(encoder[label])
-    
-    counter = Counter(labels)
-    total = len(labels)
-    num_classes = len(encoder)
-    
-    weights = []
-    for i in range(num_classes):
-        count = counter.get(i, 1)  # Avoid division by zero
-        weights.append(total / (num_classes * count))
-    
-    return torch.tensor(weights, dtype=torch.float32)
-
-
 def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
                 criterion_age, optimizer, device):
     """Train for one epoch. Returns (metrics_dict, was_stopped)."""
@@ -309,6 +292,7 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
     gender_loss_sum = 0.0
     age_loss_sum = 0.0
     num_batches = 0
+
     # BF16 autocast — only when the GPU actually supports it
     _use_bf16 = device.type == 'cuda' and torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if _use_bf16 else torch.float32
@@ -501,20 +485,6 @@ def main():
         print("Warning: No validation split found. Using train split for validation.")
         val_dataset = train_dataset
     
-    # Compute class weights for balanced sampling
-    emotion_weights = compute_class_weights(dataset, 'emotion', emotion_encoder)
-    gender_weights = compute_class_weights(dataset, 'gender', gender_encoder)
-    age_weights = compute_class_weights(dataset, 'age_category', age_encoder)
-    
-    # Create weighted sampler (using emotion weights as primary)
-    sample_weights = [emotion_weights[train_dataset[i]['emotion'].item()] 
-                     for i in range(len(train_dataset))]
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-    
     # Create data loaders
     # persistent_workers keeps worker processes alive between epochs (avoids fork overhead)
     # prefetch_factor=2 queues 2 batches per worker in advance
@@ -522,7 +492,7 @@ def main():
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        sampler=sampler,
+        shuffle=True,
         num_workers=4,
         pin_memory=_pin,
         persistent_workers=True,
@@ -559,22 +529,20 @@ def main():
     _fused_opt = DEVICE.type == 'cuda'
     try:
         optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
             {'params': head_params, 'lr': HEAD_LEARNING_RATE}
         ], weight_decay=0.01, fused=_fused_opt)
         if _fused_opt:
             print("  Optimizer: fused AdamW")
     except (TypeError, RuntimeError):
         optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': LEARNING_RATE * 0.1},
             {'params': head_params, 'lr': HEAD_LEARNING_RATE}
         ], weight_decay=0.01)
         print("  Optimizer: standard AdamW (fused not available)")
 
-    # Loss functions
-    criterion_emotion = nn.CrossEntropyLoss(weight=emotion_weights.to(DEVICE))
-    criterion_gender = nn.CrossEntropyLoss(weight=gender_weights.to(DEVICE))
-    criterion_age = nn.CrossEntropyLoss(weight=age_weights.to(DEVICE))
+    # Loss functions (no class weights; dataset is balanced)
+    criterion_emotion = nn.CrossEntropyLoss()
+    criterion_gender = nn.CrossEntropyLoss()
+    criterion_age = nn.CrossEntropyLoss()
 
     # Resume from latest checkpoint if training didn't finish
     metrics_path = MODEL_DIR / "training_metrics.json"
@@ -601,10 +569,11 @@ def main():
     # torch.compile with mode='default' uses TorchInductor kernel fusion.
     # Graph breaks (e.g. from HuBERT's masking ops) are handled gracefully in
     # default mode — dynamo compiles the parts it can and runs the rest eagerly.
+    # dynamic=None allows dynamic shapes after first compile to reduce recompiles.
     if DEVICE.type == 'cuda' and hasattr(torch, 'compile'):
         try:
             print("Compiling model with torch.compile(mode='default')...")
-            model = torch.compile(model, mode='default', dynamic=False)
+            model = torch.compile(model, mode='default', dynamic=None)
         except Exception as e:
             print(f"  torch.compile unavailable ({e}), running eager.")
 

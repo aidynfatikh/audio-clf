@@ -6,26 +6,15 @@ Stage 2 training: loads a checkpoint from frozen-backbone training (train.py),
 then unfreezes the top-N HuBERT transformer layers (ranked by learned per-task
 layer weights), and continues training with a low backbone LR.
 
-Usage
------
-# Show which layers the model learned to use most (analysis mode):
-    python finetune.py --analyze
-
-# Fine-tune with default settings (unfreeze top 4 transformer layers):
-    python finetune.py
-
-# Unfreeze top 6 transformer layers + feature projection:
-    python finetune.py --unfreeze_top_n 6 --unfreeze_feature_proj
-
-# Gradual unfreezing: start with top 2, add 2 more every N epochs:
-    python finetune.py --gradual --unfreeze_top_n 8 --gradual_step 2 --gradual_every 3
+Usage:
+  python finetune.py              # Fine-tune with defaults (top 4 layers)
+  python finetune.py --analyze    # Print layer importance and exit
 """
 
 import os
 import signal
 import sys
 import warnings
-import argparse
 
 os.environ['DATASETS_AUDIO_BACKEND'] = 'soundfile'
 os.environ['TORCHCODEC_QUIET'] = '1'
@@ -34,21 +23,19 @@ warnings.filterwarnings('ignore', category=UserWarning)
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from transformers import HubertModel, Wav2Vec2FeatureExtractor
 from datasets import Audio
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import json
-from collections import Counter
 
 from load_data import load, read_audio, DATA_DIR
 from train import (
     MultiTaskHubert,
     AudioDataset,
     build_label_encoders,
-    compute_class_weights,
     train_epoch,
     validate,
     _sigint_handler,
@@ -78,6 +65,11 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 # All fine-tune outputs go here so they never overwrite stage-1 files
 FINETUNE_DIR = MODEL_DIR / "finetune"
 FINETUNE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Fine-tune defaults (no CLI)
+UNFREEZE_TOP_N = 4
+UNFREEZE_FEATURE_PROJ = False
+ANALYZE_ONLY = "--analyze" in sys.argv
 
 # HuBERT has 13 hidden states: index 0 = feature-projection output,
 # indices 1-12 = transformer encoder layers [0..11].
@@ -250,37 +242,6 @@ def describe_frozen_state(model: MultiTaskHubert) -> None:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--analyze", action="store_true",
-                   help="Print layer importance analysis and exit.")
-    p.add_argument("--checkpoint", type=str, default=None,
-                   help="Path to checkpoint (.pt). Defaults to models/best_model.pt, "
-                        "then models/latest_checkpoint.pt.")
-    p.add_argument("--unfreeze_top_n", type=int, default=4,
-                   help="Number of top-ranked transformer layers to unfreeze (default: 4).")
-    p.add_argument("--unfreeze_feature_proj", action="store_true",
-                   help="Also unfreeze the feature-projection layer.")
-    p.add_argument("--backbone_lr_top", type=float, default=BACKBONE_LR_TOP,
-                   help=f"LR for the top unfrozen encoder layer before decay (default: {BACKBONE_LR_TOP}).")
-    p.add_argument("--layer_decay", type=float, default=LAYER_DECAY,
-                   help=f"Geometric decay factor ξ between encoder layers (default: {LAYER_DECAY}). "
-                        "LR_n = backbone_lr_top * layer_decay^(12-n).")
-    p.add_argument("--head_lr", type=float, default=HEAD_LR,
-                   help=f"LR for classification heads (default: {HEAD_LR}).")
-    p.add_argument("--epochs", type=int, default=NUM_EPOCHS,
-                   help=f"Max fine-tuning epochs (default: {NUM_EPOCHS}).")
-    p.add_argument("--batch_size", type=int, default=BATCH_SIZE)
-    p.add_argument("--gradual", action="store_true",
-                   help="Gradual unfreezing: start with top gradual_step layers and "
-                        "add gradual_step more every gradual_every epochs.")
-    p.add_argument("--gradual_step", type=int, default=2,
-                   help="Layers to add per unfreezing phase (default: 2).")
-    p.add_argument("--gradual_every", type=int, default=2,
-                   help="Unfreeze an additional group every N epochs (default: 2).")
-    return p.parse_args()
-
-
 def build_optimizer(
     model: MultiTaskHubert,
     layer_indices: list[int],
@@ -356,7 +317,6 @@ def _print_lr_schedule(layer_indices: list[int], backbone_lr_top: float,
 
 def main() -> None:
     global _stop_requested
-    args = parse_args()
     signal.signal(signal.SIGINT, _sigint_handler)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -374,20 +334,17 @@ def main() -> None:
     layer_prefs = latest_layer_prefs(MODEL_DIR)
     ranked_layers = rank_transformer_layers(layer_prefs)
 
-    if args.analyze:
+    if ANALYZE_ONLY:
         print_layer_analysis(layer_prefs, ranked_layers)
         return
 
     print_layer_analysis(layer_prefs, ranked_layers)
-    layers_to_unfreeze = ranked_layers[: args.unfreeze_top_n]
+    layers_to_unfreeze = ranked_layers[:UNFREEZE_TOP_N]
     print(f"Fine-tuning plan:")
-    print(f"  Will unfreeze top-{args.unfreeze_top_n} transformer layers: "
+    print(f"  Will unfreeze top-{UNFREEZE_TOP_N} transformer layers: "
           f"encoder.layers{sorted(layers_to_unfreeze)}")
-    if args.unfreeze_feature_proj:
+    if UNFREEZE_FEATURE_PROJ:
         print("  Also unfreezing: feature_projection")
-    if args.gradual:
-        print(f"  Gradual mode: starting with top-{args.gradual_step}, "
-              f"adding {args.gradual_step} every {args.gradual_every} epochs")
 
     # ── Load data ─────────────────────────────────────────────────────────────
     dataset = load()
@@ -400,23 +357,20 @@ def main() -> None:
 
     # ── Resolve checkpoint ────────────────────────────────────────────────────
     # Priority:
-    #   1. --checkpoint (explicit override)
-    #   2. models/finetune/latest_checkpoint_finetune.pt  (resume interrupted run)
-    #   3. models/best_model.pt                           (fresh start from stage-1)
+    #   1. models/finetune/latest_checkpoint_finetune.pt  (resume interrupted run)
+    #   2. models/best_model.pt                           (fresh start from stage-1)
     metrics_path    = FINETUNE_DIR / "training_metrics_finetune.json"
     best_model_path = FINETUNE_DIR / "best_model_finetuned.pt"
     latest_ft_path  = FINETUNE_DIR / "latest_checkpoint_finetune.pt"
 
     _is_finetune_resume = False
-    if args.checkpoint:
-        ckpt_path = Path(args.checkpoint)
-    elif latest_ft_path.exists():
+    if latest_ft_path.exists():
         # Peek at the checkpoint to verify it is compatible and not finished
         _peek = torch.load(latest_ft_path, map_location="cpu", weights_only=False)
         if (_peek.get("num_emotions") == num_emotions
                 and _peek.get("num_genders") == num_genders
                 and _peek.get("num_ages") == num_ages
-                and _peek["epoch"] + 1 < args.epochs):
+                and _peek["epoch"] + 1 < NUM_EPOCHS):
             ckpt_path = latest_ft_path
             _is_finetune_resume = True
         else:
@@ -448,31 +402,20 @@ def main() -> None:
     model.load_state_dict(ckpt["model_state_dict"])
 
     # ── Unfreeze layers ───────────────────────────────────────────────────────
-    if args.gradual:
-        # Start with the first group only
-        initial_n = args.gradual_step
-        current_unfrozen_n = [initial_n]
-        unfreeze_layers(
-            model,
-            ranked_layers[:initial_n],
-            unfreeze_feature_proj=args.unfreeze_feature_proj,
-        )
-    else:
-        unfreeze_layers(
-            model,
-            layers_to_unfreeze,
-            unfreeze_feature_proj=args.unfreeze_feature_proj,
-        )
+    unfreeze_layers(
+        model,
+        layers_to_unfreeze,
+        unfreeze_feature_proj=UNFREEZE_FEATURE_PROJ,
+    )
 
     describe_frozen_state(model)
 
     # ── Optimizer & metrics state ─────────────────────────────────────────────
     # Build optimizer before torch.compile: param tensors must be plain Python
     # objects so the optimizer holds direct references (not wrapped proxies).
-    _active_layers = ranked_layers[:initial_n] if args.gradual else layers_to_unfreeze
-    _print_lr_schedule(_active_layers, args.backbone_lr_top, args.layer_decay, args.head_lr)
-    optimizer = build_optimizer(model, _active_layers,
-                                args.backbone_lr_top, args.layer_decay, args.head_lr)
+    _print_lr_schedule(layers_to_unfreeze, BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
+    optimizer = build_optimizer(model, layers_to_unfreeze,
+                                BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
 
     best_val_loss = float("inf")
     all_metrics: list[dict] = []
@@ -487,12 +430,10 @@ def main() -> None:
         if metrics_path.exists():
             with open(metrics_path) as f:
                 all_metrics = json.load(f)
-        print(f"Resuming fine-tuning from epoch {start_epoch + 1}/{args.epochs}")
+        print(f"Resuming fine-tuning from epoch {start_epoch + 1}/{NUM_EPOCHS}")
 
     # torch.compile with mode='default' — see train.py for details.
-    # Skipped in gradual mode because each unfreeze phase invalidates the
-    # compiled graph, so recompilation cost exceeds the benefit.
-    if device.type == 'cuda' and not args.gradual and hasattr(torch, 'compile'):
+    if device.type == 'cuda' and hasattr(torch, 'compile'):
         try:
             print("Compiling model with torch.compile(mode='default')...")
             model = torch.compile(model, mode='default', dynamic=False)
@@ -514,54 +455,26 @@ def main() -> None:
     val_dataset   = (AudioDataset(val_split, processor, emotion_encoder, gender_encoder, age_encoder)
                      if val_split is not None else train_dataset)
 
-    # Class-weighted sampler
-    emotion_weights_vec = compute_class_weights(dataset, "emotion", emotion_encoder)
-    gender_weights_vec  = compute_class_weights(dataset, "gender",  gender_encoder)
-    age_weights_vec     = compute_class_weights(dataset, "age_category", age_encoder)
-
-    sample_weights = [emotion_weights_vec[train_dataset[i]["emotion"].item()]
-                      for i in range(len(train_dataset))]
-    sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
-
     pin = device.type == "cuda"
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, sampler=sampler,
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, pin_memory=pin,
                               persistent_workers=True, prefetch_factor=2)
-    val_loader   = DataLoader(val_dataset,   batch_size=args.batch_size, shuffle=False,
+    val_loader   = DataLoader(val_dataset,   batch_size=BATCH_SIZE, shuffle=False,
                               num_workers=4, pin_memory=pin,
                               persistent_workers=True, prefetch_factor=2)
 
-    criterion_emotion = nn.CrossEntropyLoss(weight=emotion_weights_vec.to(device))
-    criterion_gender  = nn.CrossEntropyLoss(weight=gender_weights_vec.to(device))
-    criterion_age     = nn.CrossEntropyLoss(weight=age_weights_vec.to(device))
+    criterion_emotion = nn.CrossEntropyLoss()
+    criterion_gender  = nn.CrossEntropyLoss()
+    criterion_age     = nn.CrossEntropyLoss()
 
-    print(f"\nStarting fine-tuning for {args.epochs} epochs. Press Ctrl+C to stop and save.")
+    print(f"\nStarting fine-tuning for {NUM_EPOCHS} epochs. Press Ctrl+C to stop and save.")
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, NUM_EPOCHS):
         if _stop_requested:
             break
 
-        # Gradual unfreezing: add more layers at scheduled intervals
-        if args.gradual and epoch > 0 and epoch % args.gradual_every == 0:
-            prev_n = current_unfrozen_n[0]
-            new_n  = min(prev_n + args.gradual_step, args.unfreeze_top_n)
-            if new_n > prev_n:
-                print(f"\n[Gradual] Epoch {epoch + 1}: unfreezing layers "
-                      f"{prev_n + 1}…{new_n} (encoder.layers{sorted(ranked_layers[prev_n:new_n])})")
-                unfreeze_layers(model, ranked_layers[prev_n:new_n],
-                                unfreeze_feature_proj=False)
-                describe_frozen_state(model)
-                # Rebuild optimizer so new params get tracked with their decay LRs
-                _now_active = ranked_layers[:new_n]
-                _print_lr_schedule(_now_active, args.backbone_lr_top,
-                                   args.layer_decay, args.head_lr)
-                optimizer = build_optimizer(model, _now_active,
-                                            args.backbone_lr_top, args.layer_decay,
-                                            args.head_lr)
-                current_unfrozen_n[0] = new_n
-
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+        print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
         print("-" * 50)
 
         train_metrics, stopped = train_epoch(
@@ -594,8 +507,7 @@ def main() -> None:
         _m = _unwrap(model)
         epoch_record = {
             "epoch": epoch + 1,
-            "unfrozen_layers": sorted(ranked_layers[:current_unfrozen_n[0]])
-                               if args.gradual else sorted(layers_to_unfreeze),
+            "unfrozen_layers": sorted(layers_to_unfreeze),
             "train": {k: round(float(v), 6) for k, v in train_metrics.items()},
             "val":   {k: round(float(v), 6) for k, v in val_metrics.items()},
             "layer_prefs": {
