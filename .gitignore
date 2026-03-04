@@ -2,7 +2,6 @@
 models/
 data/
 *.pt
-*.json
 *.log
 *.err
 *.out

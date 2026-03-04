@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Evaluate single-head HuBERT checkpoints and plot training history.
+"""Evaluate single-head HuBERT finetuned checkpoints and plot training history.
 
-Outputs written to single_head/eval/ (or single_head/eval/{feature}/ if you want per-feature):
-  training_curves.png   — loss + accuracy (stage-1 → finetune)
-  layer_weights.png     — learned layer attention for the feature
-  eval_results.json     — per-checkpoint accuracy + per-class breakdown
-  accuracy_bars.png     — per-class accuracy
+Runs only on finetuned best and latest (no stage-1 checkpoints).
+
+Outputs written to single_head/eval/:
+  training_curves_{feature}.png   — loss + accuracy (stage-1 → finetune)
+  layer_weights_{feature}.png    — learned layer attention
+  eval_results_{feature}.json     — per-checkpoint accuracy + per-class breakdown
+  accuracy_bars_{feature}.png    — per-class accuracy
 
 Usage:
-  python single_head/evaluate_single.py --feature emotion   # default
+  python single_head/evaluate_single.py --feature emotion
   python single_head/evaluate_single.py --feature age --split test
+  python single_head/evaluate_single.py --feature emotion --train   # also run on train split
 """
 
 import argparse
 import json
+import os
 import sys
 import warnings
 from collections import defaultdict
@@ -188,6 +192,7 @@ def plot_accuracy_bars(all_results: dict, feature: str, out_path: Path) -> None:
 
 
 def _candidate_checkpoints(feature: str) -> list[tuple[str, Path]]:
+    """Only finetuned best and latest (no stage-1 checkpoints)."""
     MODEL_DIR = MODEL_BASE / feature
     FINETUNE_DIR = MODEL_DIR / "finetune"
     pairs = []
@@ -195,12 +200,11 @@ def _candidate_checkpoints(feature: str) -> list[tuple[str, Path]]:
         pairs.append(("Finetuned best", FINETUNE_DIR / "best_model_finetuned.pt"))
     if (FINETUNE_DIR / "latest_checkpoint_finetune.pt").exists():
         pairs.append(("Finetuned latest", FINETUNE_DIR / "latest_checkpoint_finetune.pt"))
-    if (MODEL_DIR / "best_model.pt").exists():
-        pairs.append(("Stage-1 best", MODEL_DIR / "best_model.pt"))
-    if (MODEL_DIR / "latest_checkpoint.pt").exists():
-        pairs.append(("Stage-1 latest", MODEL_DIR / "latest_checkpoint.pt"))
     if not pairs:
-        sys.exit(f"No checkpoints found for feature '{feature}'. Run train_single.py --feature {feature} first.")
+        sys.exit(
+            f"No finetuned checkpoints found for feature '{feature}'. "
+            f"Run finetune_single.py --feature {feature} first."
+        )
     return pairs
 
 
@@ -260,6 +264,8 @@ def main():
     parser.add_argument("--feature", default="emotion", choices=list(FEATURES), help="Feature to evaluate.")
     parser.add_argument("--split", default="both", choices=["val", "test", "train", "both", "all"],
                         help="Split(s) to evaluate. both=val+test, all=train+val+test")
+    parser.add_argument("--train", action="store_true",
+                        help="Also evaluate on train split (in addition to --split)")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", default=None)
@@ -307,6 +313,9 @@ def main():
         splits_to_eval = {args.split: _cast(args.split)}
     else:
         sys.exit(f"Split '{args.split}' not in dataset. Available: {list(dataset.keys())}")
+
+    if args.train and "train" in dataset and "train" not in splits_to_eval:
+        splits_to_eval["train"] = _cast("train")
 
     print("Evaluating on splits:", list(splits_to_eval.keys()))
 
