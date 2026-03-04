@@ -12,3 +12,5 @@ data/
 *.log.lzma
 *.log.zstd
 __pycache__/
+.gradio
+el_audios/

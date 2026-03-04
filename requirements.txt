@@ -7,3 +7,5 @@ librosa>=0.10.0
 python-dotenv>=1.0.0
 tqdm>=4.65.0
 numpy>=1.24.0
+gradio>=4.0.0
+elevenlabs>=1.0.0

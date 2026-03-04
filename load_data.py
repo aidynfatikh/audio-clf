@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 from huggingface_hub import login
 from datasets import load_dataset
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-DOTENV = ".env"
+REPO_ROOT = Path(__file__).resolve().parent
+DOTENV = REPO_ROOT / ".env"
 DATASET_ID = "01gumano1d/batch01-aug"
 DATA_DIR = REPO_ROOT / "data" / "batch01-aug"
 

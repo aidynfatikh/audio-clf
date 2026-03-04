@@ -6,6 +6,7 @@ Fine-tune HuBERT with multiple heads for emotion, gender, and age classification
 
 1. Install dependencies:
 ```bash
+source /home/fatikh/ML/ML/bin/activate   # or your venv
 pip install -r requirements.txt
 ```
 
@@ -34,6 +35,30 @@ python finetune.py
 ```
 - Loads stage-1 checkpoint, unfreezes the top-ranked transformer layers (see below), trains with discriminative LRs.
 - Saves to `models/finetune/`. Use `python finetune.py --analyze` to print layer importance and exit.
+
+### Generate test audio (ElevenLabs)
+
+Generate 16 kHz WAVs from a text file for testing the classifier. Uses ElevenLabs multilingual TTS and picks voices by gender/age.
+
+1. Get an API key from [ElevenLabs](https://elevenlabs.io/app/settings/api-keys) and set it:
+   ```bash
+   export ELEVENLABS_API_KEY=your_key
+   ```
+   Or add `ELEVENLABS_API_KEY=...` to `.env`.
+
+2. Create a txt file with one line per utterance:
+   ```
+   M,child,neutral: Үстелде тыныш қана сурет салып отырмын [calm].
+   F,child,neutral: Сабақтан кейін дәптерлерімді реттеп қойдым [steady tone].
+   M,young,neutral: Аялдамада автобусты күтіп тұрмын [neutral].
+   ```
+
+3. Run (with your venv activated):
+   ```bash
+   source /home/fatikh/ML/ML/bin/activate
+   python scripts/generate_test_audio_elevenlabs.py scripts/sample_input.txt -o generated_audio
+   ```
+   Output is written to `generated_audio/` as 16 kHz WAVs. Use `--model eleven_multilingual_v2` (default) or `eleven_turbo_v2_5`; see `--help` for options.
 
 ### Configuration
 
