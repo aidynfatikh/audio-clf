@@ -22,6 +22,8 @@ if str(_REPO_ROOT) not in sys.path:
 os.environ['DATASETS_AUDIO_BACKEND'] = 'soundfile'
 os.environ['TORCHCODEC_QUIET'] = '1'
 os.environ['TORCHINDUCTOR_MAX_AUTOTUNE'] = '0'
+# Reduce VRAM fragmentation from PyTorch's caching allocator.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', module='torch._dynamo')
 warnings.filterwarnings('ignore', module='torch._inductor.utils')
@@ -54,7 +56,10 @@ GRAD_CLIP_NORM = 1.0
 
 if DEVICE.type == 'cuda':
     torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    # benchmark=True spikes VRAM during cuDNN algorithm search. Inputs are
+    # fixed-length (max_length padding), so benchmarking gives no benefit.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
     torch.set_float32_matmul_precision('high')
 
 _stop_requested = False

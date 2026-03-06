@@ -12,6 +12,10 @@ os.environ['DATASETS_AUDIO_BACKEND'] = 'soundfile'
 os.environ['TORCHCODEC_QUIET'] = '1'
 # Uncomment to silence "Not enough SMs to use max_autotune_gemm" on smaller GPUs:
 os.environ['TORCHINDUCTOR_MAX_AUTOTUNE'] = '0'
+# Reduce VRAM fragmentation from PyTorch's caching allocator (especially after
+# interrupted runs). expandable_segments lets the allocator release and reuse
+# smaller blocks instead of holding onto large reserved chunks.
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 warnings.filterwarnings('ignore', category=UserWarning)
 # Suppress torch.compile recompile/duplicate-tensor and inductor max_autotune messages
 warnings.filterwarnings('ignore', module='torch._dynamo')
@@ -44,7 +48,11 @@ SAMPLE_RATE = 16000  # HuBERT requires 16kHz
 # ── GPU throughput optimizations (PyTorch 2.x / CUDA 12.x) ──────────────────
 if DEVICE.type == 'cuda':
     torch.backends.cuda.matmul.allow_tf32 = True   # TF32 matmul (disabled by default)
-    torch.backends.cudnn.benchmark = True           # auto-tune cuDNN kernels
+    # benchmark=True probes cuDNN conv algorithms on first use, spiking VRAM by
+    # ~0.5-1.5 GB. Since all inputs are padded to a fixed max_length the optimal
+    # algorithm never changes between runs, so the benchmark overhead is pure waste.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False      # still allow non-deterministic (fast) kernels
     torch.set_float32_matmul_precision('high')      # prefer TF32 over full fp32
 
 # Loss weights for multi-task learning
