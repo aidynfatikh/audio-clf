@@ -46,11 +46,12 @@ from train_single import (
     validate,
     _sigint_handler,
     _unwrap,
+    _make_cosine_schedule,
     FEATURES,
 )
 
 BATCH_SIZE = 8
-NUM_EPOCHS = 10
+NUM_EPOCHS = 20
 SAMPLE_RATE = 16000
 BACKBONE_LR_TOP = 5e-5
 LAYER_DECAY = 0.85
@@ -234,6 +235,9 @@ def main() -> None:
     describe_frozen_state(model)
 
     optimizer = build_optimizer(model, layers_to_unfreeze, BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
+    # LR schedule: hold for 5 epochs, then cosine decay for 15 epochs to 1% of initial LR
+    # Applies uniformly across all param groups, preserving their relative layer-decay ratios.
+    scheduler = _make_cosine_schedule(optimizer, hold_epochs=5, decay_epochs=15)
     criterion = nn.CrossEntropyLoss()
 
     best_val_loss = float("inf")
@@ -244,6 +248,11 @@ def main() -> None:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         start_epoch = ckpt["epoch"] + 1
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        else:
+            for _ in range(start_epoch):
+                scheduler.step()
         if metrics_path.exists():
             with open(metrics_path) as f:
                 all_metrics = json.load(f)
@@ -321,10 +330,15 @@ def main() -> None:
             }, best_model_path)
             print(f"  ✓ New best val loss: {best_val_loss:.4f} → {best_model_path.name}")
 
+        # Advance LR schedule and log current LRs (top backbone layer / head)
+        scheduler.step()
+        print(f"  LR backbone/head: {optimizer.param_groups[0]['lr']:.2e} / {optimizer.param_groups[-1]['lr']:.2e}")
+
         torch.save({
             "epoch": epoch,
             "model_state_dict": _unwrap(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "best_val_loss": best_val_loss,
             "feature": feature,
             "num_classes": num_classes,

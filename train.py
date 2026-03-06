@@ -29,6 +29,7 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import json
+import math
 
 # Import load_data (warnings already suppressed in load_data.py)
 from load_data import load, read_audio, DATA_DIR
@@ -94,6 +95,28 @@ def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> tor
     return pooled.mean(dim=1)                                # [B, H]
 
 
+def _make_cosine_schedule(
+    optimizer: optim.Optimizer,
+    hold_epochs: int,
+    decay_epochs: int,
+    eta_min_factor: float = 1e-2,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Hold LR for hold_epochs, then cosine-anneal to eta_min_factor * base_lr.
+
+    Works for any number of param groups — each group's LR is scaled by the
+    same lambda, so relative differences (e.g. layer-decay in finetune) are kept.
+    """
+    def lr_lambda(epoch: int) -> float:
+        if epoch < hold_epochs:
+            return 1.0
+        # Use (decay_epochs - 1) so the minimum is reached at the very last
+        # training epoch rather than one step after it.
+        t = min((epoch - hold_epochs) / max(decay_epochs - 1, 1), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * t))
+        return eta_min_factor + (1.0 - eta_min_factor) * cosine
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 class MultiTaskHubert(nn.Module):
     """HuBERT model with three heads using task-specific weighted layer sums."""
 
@@ -141,12 +164,16 @@ class MultiTaskHubert(nn.Module):
         outputs = self.hubert(input_values)
 
         # hidden_states: tuple of 13 tensors [batch, time, hidden].
-        # HuggingFace often returns views that share storage (residual connections).
-        # torch.compile/dynamo treats them as "duplicate tensors" and recompiles repeatedly.
-        # .detach().clone() breaks the alias so dynamo sees 13 independent tensors.
-        all_layers = torch.stack(
-            [h.detach().clone() for h in outputs.hidden_states]
-        )  # [13, B, T, H]
+        # When backbone is fully frozen: .detach().clone() saves memory and breaks
+        # HuggingFace storage aliasing so dynamo sees 13 independent tensors.
+        # When any layer is unfrozen (finetune): do not detach so gradients flow.
+        backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
+        if backbone_frozen:
+            all_layers = torch.stack(
+                [h.detach().clone() for h in outputs.hidden_states]
+            )  # [13, B, T, H]
+        else:
+            all_layers = torch.stack(outputs.hidden_states, dim=0)
 
         emo_feats = _weighted_pool(all_layers, self.emotion_weights)
         gen_feats = _weighted_pool(all_layers, self.gender_weights)
@@ -539,6 +566,10 @@ def main():
         ], weight_decay=0.01)
         print("  Optimizer: standard AdamW (fused not available)")
 
+    # LR schedule: hold HEAD_LEARNING_RATE for 3 epochs, then cosine decay for 7 epochs
+    # to 1e-2 × initial LR  (1e-3 → 1e-5)
+    scheduler = _make_cosine_schedule(optimizer, hold_epochs=3, decay_epochs=7)
+
     # Loss functions (no class weights; dataset is balanced)
     criterion_emotion = nn.CrossEntropyLoss()
     criterion_gender = nn.CrossEntropyLoss()
@@ -561,6 +592,11 @@ def main():
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             start_epoch = ckpt["epoch"] + 1
+            if "scheduler_state_dict" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            else:
+                for _ in range(start_epoch):
+                    scheduler.step()
             if metrics_path.exists():
                 with open(metrics_path) as f:
                     all_metrics = json.load(f)
@@ -646,11 +682,16 @@ def main():
             }, model_path)
             print(f"Saved best model to {model_path}")
 
+        # Advance LR schedule and log current LR
+        scheduler.step()
+        print(f"  LR: {optimizer.param_groups[0]['lr']:.2e}")
+
         # Save latest checkpoint (for resume; metadata: epoch = completed epoch)
         torch.save({
             'epoch': epoch,
             'model_state_dict': _unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'best_val_loss': best_val_loss,
             'num_emotions': num_emotions,
             'num_genders': num_genders,

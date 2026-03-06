@@ -36,6 +36,7 @@ from datasets import Audio
 import numpy as np
 from tqdm import tqdm
 import json
+import math
 
 from load_data import load, read_audio
 
@@ -76,6 +77,28 @@ def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> tor
     w = torch.softmax(layer_weights, dim=0)
     pooled = (w.view(-1, 1, 1, 1) * all_layers).sum(dim=0)
     return pooled.mean(dim=1)
+
+
+def _make_cosine_schedule(
+    optimizer: optim.Optimizer,
+    hold_epochs: int,
+    decay_epochs: int,
+    eta_min_factor: float = 1e-2,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Hold LR for hold_epochs, then cosine-anneal to eta_min_factor * base_lr.
+
+    Works for any number of param groups — each group's LR is scaled by the
+    same lambda, so relative differences (e.g. layer-decay in finetune) are kept.
+    """
+    def lr_lambda(epoch: int) -> float:
+        if epoch < hold_epochs:
+            return 1.0
+        # Use (decay_epochs - 1) so the minimum is reached at the very last
+        # training epoch rather than one step after it.
+        t = min((epoch - hold_epochs) / max(decay_epochs - 1, 1), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * t))
+        return eta_min_factor + (1.0 - eta_min_factor) * cosine
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 class SingleHeadHubert(nn.Module):
@@ -366,6 +389,10 @@ def main():
             [{"params": head_params, "lr": HEAD_LEARNING_RATE}],
             weight_decay=0.01,
         )
+    # LR schedule: hold HEAD_LEARNING_RATE for 3 epochs, then cosine decay for 7 epochs
+    # to 1e-2 × initial LR  (1e-3 → 1e-5)
+    scheduler = _make_cosine_schedule(optimizer, hold_epochs=3, decay_epochs=7)
+
     criterion = nn.CrossEntropyLoss()
 
     metrics_path = MODEL_DIR / "training_metrics.json"
@@ -383,6 +410,11 @@ def main():
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             start_epoch = ckpt["epoch"] + 1
+            if "scheduler_state_dict" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            else:
+                for _ in range(start_epoch):
+                    scheduler.step()
             if metrics_path.exists():
                 with open(metrics_path) as f:
                     all_metrics = json.load(f)
@@ -439,10 +471,15 @@ def main():
             }, model_path)
             print(f"Saved best model to {model_path}")
 
+        # Advance LR schedule and log current LR
+        scheduler.step()
+        print(f"  LR: {optimizer.param_groups[0]['lr']:.2e}")
+
         torch.save({
             "epoch": epoch,
             "model_state_dict": _unwrap(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "best_val_loss": best_val_loss,
             "feature": feature,
             "num_classes": num_classes,
