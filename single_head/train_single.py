@@ -104,9 +104,15 @@ class SingleHeadHubert(nn.Module):
 
     def forward(self, input_values):
         outputs = self.hubert(input_values)
-        all_layers = torch.stack(
-            [h.detach().clone() for h in outputs.hidden_states]
-        )
+        # Only detach when backbone is fully frozen (stage-1) to save memory.
+        # When any layer is unfrozen (finetune), gradients must flow through the encoder.
+        backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
+        if backbone_frozen:
+            all_layers = torch.stack(
+                [h.detach().clone() for h in outputs.hidden_states]
+            )
+        else:
+            all_layers = torch.stack(outputs.hidden_states, dim=0)
         feats = _weighted_pool(all_layers, self.layer_weights)
         return self.head(feats)
 
