@@ -34,6 +34,7 @@ from pathlib import Path
 from tqdm import tqdm
 import json
 import math
+import random
 
 # Import load_data (warnings already suppressed in load_data.py)
 from load_data import load, read_audio, DATA_DIR
@@ -61,6 +62,7 @@ GENDER_WEIGHT = 0.5
 AGE_WEIGHT = 1.0
 
 GRAD_CLIP_NORM = 1.0      # max gradient norm for clipping (stabilises mixed-precision training)
+EARLY_STOPPING_PATIENCE = 5  # stop when val loss does not improve for this many epochs
 
 # Model save directory
 MODEL_DIR = Path(__file__).resolve().parent / "models"
@@ -68,6 +70,19 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # Safe stop: set by SIGINT handler (Ctrl+C)
 _stop_requested = False
+
+RANDOM_SEED = 42
+
+
+def set_seed(seed: int = RANDOM_SEED) -> None:
+    """Set global seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def _unwrap(model: nn.Module) -> nn.Module:
@@ -103,6 +118,32 @@ def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> tor
     return pooled.mean(dim=1)                                # [B, H]
 
 
+def _spec_augment(
+    all_layers: torch.Tensor,
+    time_mask_param: int = 70,
+    freq_mask_param: int = 27,
+    num_time_masks: int = 2,
+    num_freq_masks: int = 2,
+) -> torch.Tensor:
+    """SpecAugment-style masking on stacked hidden states [num_layers, B, T, H].
+    LB policy (Park et al. 2019): F=27, T=70, multiplicity 2. Applied online during
+    training so the model never sees the same corrupted version twice."""
+    _, _, T, H = all_layers.shape
+    out = all_layers.clone()
+    device = all_layers.device
+    # Time masking: up to `time_mask_param` consecutive steps (paper: 40–70)
+    for _ in range(num_time_masks):
+        t_len = min(time_mask_param, max(1, T - 1))
+        t_start = torch.randint(0, max(1, T - t_len + 1), (1,), device=device).item()
+        out[:, :, t_start : t_start + t_len, :] = 0.0
+    # Frequency masking: up to `freq_mask_param` consecutive channels (paper: 27)
+    for _ in range(num_freq_masks):
+        f_len = min(freq_mask_param, max(1, H - 1))
+        f_start = torch.randint(0, max(1, H - f_len + 1), (1,), device=device).item()
+        out[:, :, :, f_start : f_start + f_len] = 0.0
+    return out
+
+
 def _make_cosine_schedule(
     optimizer: optim.Optimizer,
     hold_epochs: int,
@@ -128,9 +169,12 @@ def _make_cosine_schedule(
 class MultiTaskHubert(nn.Module):
     """HuBERT model with three heads using task-specific weighted layer sums."""
 
-    def __init__(self, num_emotions, num_genders, num_ages, freeze_backbone=True):
+    def __init__(self, num_emotions, num_genders, num_ages, freeze_backbone=True, use_spec_augment=False):
         super().__init__()
         self.hubert = HubertModel.from_pretrained("facebook/hubert-base-ls960", output_hidden_states=True,)
+        self.use_spec_augment = use_spec_augment
+        if hasattr(self.hubert.config, 'training_drop_path'):
+            self.hubert.config.training_drop_path = 0.1
 
         if freeze_backbone:
             for param in self.hubert.parameters():
@@ -148,17 +192,19 @@ class MultiTaskHubert(nn.Module):
         self.emotion_head = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.2),
             nn.Linear(256, num_emotions),
         )
         self.gender_head = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(256, num_genders),
         )
         self.age_head = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(256, num_ages),
         )
 
@@ -182,6 +228,9 @@ class MultiTaskHubert(nn.Module):
             )  # [13, B, T, H]
         else:
             all_layers = torch.stack(outputs.hidden_states, dim=0)
+
+        if self.training and self.use_spec_augment:
+            all_layers = _spec_augment(all_layers)
 
         emo_feats = _weighted_pool(all_layers, self.emotion_weights)
         gen_feats = _weighted_pool(all_layers, self.gender_weights)
@@ -454,6 +503,7 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
 
 def main():
     global _stop_requested
+    set_seed(RANDOM_SEED)
     signal.signal(signal.SIGINT, _sigint_handler)
     print(f"Using device: {DEVICE}")
     print("Press Ctrl+C to stop training and save a checkpoint.")
@@ -578,10 +628,10 @@ def main():
     # to 1e-2 × initial LR  (1e-3 → 1e-5)
     scheduler = _make_cosine_schedule(optimizer, hold_epochs=3, decay_epochs=7)
 
-    # Loss functions (no class weights; dataset is balanced)
-    criterion_emotion = nn.CrossEntropyLoss()
-    criterion_gender = nn.CrossEntropyLoss()
-    criterion_age = nn.CrossEntropyLoss()
+    # Loss functions: label smoothing to reduce overfitting to noisy labels and rising val loss
+    criterion_emotion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion_age = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     # Resume from latest checkpoint if training didn't finish
     metrics_path = MODEL_DIR / "training_metrics.json"
@@ -590,6 +640,7 @@ def main():
     last_epoch = -1
     all_metrics = []
     start_epoch = 0
+    epochs_without_improvement = 0
 
     if latest_path.exists():
         ckpt = torch.load(latest_path, map_location=DEVICE, weights_only=False)
@@ -675,9 +726,10 @@ def main():
             json.dump(all_metrics, f, indent=2)
         print(f"Saved metrics to {metrics_path}")
 
-        # Save best model
+        # Save best model and early stopping
         if val_metrics['total'] < best_val_loss:
             best_val_loss = val_metrics['total']
+            epochs_without_improvement = 0
             model_path = MODEL_DIR / "best_model.pt"
             torch.save({
                 'epoch': epoch,
@@ -689,6 +741,11 @@ def main():
                 'num_ages': num_ages,
             }, model_path)
             print(f"Saved best model to {model_path}")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+                break
 
         # Advance LR schedule and log current LR
         scheduler.step()

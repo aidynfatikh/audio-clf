@@ -39,6 +39,7 @@ import numpy as np
 from tqdm import tqdm
 import json
 import math
+import random
 
 from load_data import load, read_audio
 
@@ -53,6 +54,8 @@ NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000
 GRAD_CLIP_NORM = 1.0
+EARLY_STOPPING_PATIENCE = 5
+RANDOM_SEED = 42
 
 if DEVICE.type == 'cuda':
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -63,6 +66,17 @@ if DEVICE.type == 'cuda':
     torch.set_float32_matmul_precision('high')
 
 _stop_requested = False
+
+
+def set_seed(seed: int = RANDOM_SEED) -> None:
+    """Set global seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def _unwrap(model: nn.Module) -> nn.Module:
@@ -82,6 +96,29 @@ def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> tor
     w = torch.softmax(layer_weights, dim=0)
     pooled = (w.view(-1, 1, 1, 1) * all_layers).sum(dim=0)
     return pooled.mean(dim=1)
+
+
+def _spec_augment(
+    all_layers: torch.Tensor,
+    time_mask_param: int = 70,
+    freq_mask_param: int = 27,
+    num_time_masks: int = 2,
+    num_freq_masks: int = 2,
+) -> torch.Tensor:
+    """SpecAugment-style masking on stacked hidden states [num_layers, B, T, H].
+    LB policy (Park et al. 2019): F=27, T=70, multiplicity 2."""
+    _, _, T, H = all_layers.shape
+    out = all_layers.clone()
+    device = all_layers.device
+    for _ in range(num_time_masks):
+        t_len = min(time_mask_param, max(1, T - 1))
+        t_start = torch.randint(0, max(1, T - t_len + 1), (1,), device=device).item()
+        out[:, :, t_start : t_start + t_len, :] = 0.0
+    for _ in range(num_freq_masks):
+        f_len = min(freq_mask_param, max(1, H - 1))
+        f_start = torch.randint(0, max(1, H - f_len + 1), (1,), device=device).item()
+        out[:, :, :, f_start : f_start + f_len] = 0.0
+    return out
 
 
 def _make_cosine_schedule(
@@ -109,13 +146,16 @@ def _make_cosine_schedule(
 class SingleHeadHubert(nn.Module):
     """HuBERT with one head and one set of layer weights for a single feature."""
 
-    def __init__(self, feature: str, num_classes: int, freeze_backbone: bool = True):
+    def __init__(self, feature: str, num_classes: int, freeze_backbone: bool = True, use_spec_augment: bool = False):
         super().__init__()
         self.feature = feature
         self.num_classes = num_classes
+        self.use_spec_augment = use_spec_augment
         self.hubert = HubertModel.from_pretrained(
             "facebook/hubert-base-ls960", output_hidden_states=True
         )
+        if hasattr(self.hubert.config, "training_drop_path"):
+            self.hubert.config.training_drop_path = 0.1
         if freeze_backbone:
             for param in self.hubert.parameters():
                 param.requires_grad = False
@@ -126,14 +166,12 @@ class SingleHeadHubert(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(hidden_size, 256),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.15),
             nn.Linear(256, num_classes),
         )
 
     def forward(self, input_values):
         outputs = self.hubert(input_values)
-        # Only detach when backbone is fully frozen (stage-1) to save memory.
-        # When any layer is unfrozen (finetune), gradients must flow through the encoder.
         backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
         if backbone_frozen:
             all_layers = torch.stack(
@@ -141,6 +179,8 @@ class SingleHeadHubert(nn.Module):
             )
         else:
             all_layers = torch.stack(outputs.hidden_states, dim=0)
+        if self.training and self.use_spec_augment:
+            all_layers = _spec_augment(all_layers)
         feats = _weighted_pool(all_layers, self.layer_weights)
         return self.head(feats)
 
@@ -313,6 +353,7 @@ def main():
     args = parser.parse_args()
     feature = args.feature
 
+    set_seed(RANDOM_SEED)
     signal.signal(signal.SIGINT, _sigint_handler)
     print(f"Using device: {DEVICE}")
     print(f"Training single-head model for feature: {feature}")
@@ -398,7 +439,7 @@ def main():
     # to 1e-2 × initial LR  (1e-3 → 1e-5)
     scheduler = _make_cosine_schedule(optimizer, hold_epochs=3, decay_epochs=7)
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     metrics_path = MODEL_DIR / "training_metrics.json"
     latest_path = MODEL_DIR / "latest_checkpoint.pt"
@@ -406,6 +447,7 @@ def main():
     last_epoch = -1
     all_metrics = []
     start_epoch = 0
+    epochs_without_improvement = 0
 
     if latest_path.exists():
         ckpt = torch.load(latest_path, map_location=DEVICE, weights_only=False)
@@ -465,6 +507,7 @@ def main():
 
         if val_metrics["total"] < best_val_loss:
             best_val_loss = val_metrics["total"]
+            epochs_without_improvement = 0
             model_path = MODEL_DIR / "best_model.pt"
             torch.save({
                 "epoch": epoch,
@@ -475,6 +518,11 @@ def main():
                 "num_classes": num_classes,
             }, model_path)
             print(f"Saved best model to {model_path}")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+                break
 
         # Advance LR schedule and log current LR
         scheduler.step()

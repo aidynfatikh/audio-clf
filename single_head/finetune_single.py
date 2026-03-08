@@ -48,6 +48,9 @@ from train_single import (
     _unwrap,
     _make_cosine_schedule,
     FEATURES,
+    set_seed,
+    RANDOM_SEED,
+    EARLY_STOPPING_PATIENCE,
 )
 
 BATCH_SIZE = 8
@@ -175,6 +178,7 @@ def main() -> None:
     UNFREEZE_TOP_N = args.unfreeze_top_n
 
     signal.signal(signal.SIGINT, _sigint_handler)
+    set_seed(RANDOM_SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     if device.type == "cuda":
@@ -228,8 +232,16 @@ def main() -> None:
     print(f"\n{'Resuming finetune from' if _is_finetune_resume else 'Starting from'}: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
-    model = SingleHeadHubert(feature=feature, num_classes=num_classes, freeze_backbone=True).to(device)
+    model = SingleHeadHubert(
+        feature=feature,
+        num_classes=num_classes,
+        freeze_backbone=True,
+        use_spec_augment=True,
+    ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
+
+    if hasattr(model.hubert.config, "training_drop_path"):
+        model.hubert.config.training_drop_path = 0.1
 
     unfreeze_layers(model, layers_to_unfreeze, unfreeze_feature_proj=False)
     describe_frozen_state(model)
@@ -238,12 +250,13 @@ def main() -> None:
     # LR schedule: hold for 5 epochs, then cosine decay for 15 epochs to 1% of initial LR
     # Applies uniformly across all param groups, preserving their relative layer-decay ratios.
     scheduler = _make_cosine_schedule(optimizer, hold_epochs=5, decay_epochs=15)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     best_val_loss = float("inf")
     all_metrics = []
     last_epoch = -1
     start_epoch = 0
+    epochs_without_improvement = 0
     if _is_finetune_resume:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
@@ -319,6 +332,7 @@ def main() -> None:
 
         if val_metrics["total"] < best_val_loss:
             best_val_loss = val_metrics["total"]
+            epochs_without_improvement = 0
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": _unwrap(model).state_dict(),
@@ -329,6 +343,11 @@ def main() -> None:
                 "unfrozen_layers": sorted(layers_to_unfreeze),
             }, best_model_path)
             print(f"  ✓ New best val loss: {best_val_loss:.4f} → {best_model_path.name}")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+                break
 
         # Advance LR schedule and log current LRs (top backbone layer / head)
         scheduler.step()

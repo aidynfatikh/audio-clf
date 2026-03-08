@@ -1,0 +1,208 @@
+{
+  "Finetuned best": {
+    "checkpoint": "/home/fatikh/issai/audio-clf/models/finetune/best_model_finetuned.pt",
+    "validation": {
+      "n": 504,
+      "accuracy": {
+        "emotion": 0.7698412698412699,
+        "gender": 0.9464285714285714,
+        "age": 0.7996031746031746
+      },
+      "per_class": {
+        "emotion": {
+          "angry": 0.7222222222222222,
+          "disgusted": 1.0,
+          "fearful": 0.8472222222222222,
+          "happy": 0.7083333333333334,
+          "neutral": 0.5694444444444444,
+          "sad": 0.8333333333333334,
+          "surprised": 0.7083333333333334
+        },
+        "gender": {
+          "F": 0.9563492063492064,
+          "M": 0.9365079365079365
+        },
+        "age": {
+          "adult": 0.6349206349206349,
+          "child": 0.8968253968253969,
+          "senior": 0.8571428571428571,
+          "young": 0.8095238095238095
+        }
+      },
+      "support": {
+        "emotion": {
+          "happy": 72,
+          "surprised": 72,
+          "angry": 72,
+          "sad": 72,
+          "neutral": 72,
+          "disgusted": 72,
+          "fearful": 72
+        },
+        "gender": {
+          "F": 252,
+          "M": 252
+        },
+        "age": {
+          "adult": 126,
+          "child": 126,
+          "senior": 126,
+          "young": 126
+        }
+      }
+    },
+    "test": {
+      "n": 504,
+      "accuracy": {
+        "emotion": 0.746031746031746,
+        "gender": 0.9444444444444444,
+        "age": 0.7916666666666666
+      },
+      "per_class": {
+        "emotion": {
+          "angry": 0.6944444444444444,
+          "disgusted": 0.9722222222222222,
+          "fearful": 0.8055555555555556,
+          "happy": 0.7083333333333334,
+          "neutral": 0.5972222222222222,
+          "sad": 0.7638888888888888,
+          "surprised": 0.6805555555555556
+        },
+        "gender": {
+          "F": 0.9484126984126984,
+          "M": 0.9404761904761905
+        },
+        "age": {
+          "adult": 0.6349206349206349,
+          "child": 0.9285714285714286,
+          "senior": 0.8888888888888888,
+          "young": 0.7142857142857143
+        }
+      },
+      "support": {
+        "emotion": {
+          "happy": 72,
+          "surprised": 72,
+          "angry": 72,
+          "sad": 72,
+          "neutral": 72,
+          "disgusted": 72,
+          "fearful": 72
+        },
+        "gender": {
+          "F": 252,
+          "M": 252
+        },
+        "age": {
+          "adult": 126,
+          "child": 126,
+          "senior": 126,
+          "young": 126
+        }
+      }
+    }
+  },
+  "Finetuned latest": {
+    "checkpoint": "/home/fatikh/issai/audio-clf/models/finetune/latest_checkpoint_finetune.pt",
+    "validation": {
+      "n": 504,
+      "accuracy": {
+        "emotion": 0.7777777777777778,
+        "gender": 0.9384920634920635,
+        "age": 0.8234126984126984
+      },
+      "per_class": {
+        "emotion": {
+          "angry": 0.7777777777777778,
+          "disgusted": 1.0,
+          "fearful": 0.875,
+          "happy": 0.6666666666666666,
+          "neutral": 0.6111111111111112,
+          "sad": 0.8055555555555556,
+          "surprised": 0.7083333333333334
+        },
+        "gender": {
+          "F": 0.9642857142857143,
+          "M": 0.9126984126984127
+        },
+        "age": {
+          "adult": 0.753968253968254,
+          "child": 0.9206349206349206,
+          "senior": 0.9126984126984127,
+          "young": 0.7063492063492064
+        }
+      },
+      "support": {
+        "emotion": {
+          "happy": 72,
+          "surprised": 72,
+          "angry": 72,
+          "sad": 72,
+          "neutral": 72,
+          "disgusted": 72,
+          "fearful": 72
+        },
+        "gender": {
+          "F": 252,
+          "M": 252
+        },
+        "age": {
+          "adult": 126,
+          "child": 126,
+          "senior": 126,
+          "young": 126
+        }
+      }
+    },
+    "test": {
+      "n": 504,
+      "accuracy": {
+        "emotion": 0.7638888888888888,
+        "gender": 0.9384920634920635,
+        "age": 0.7619047619047619
+      },
+      "per_class": {
+        "emotion": {
+          "angry": 0.7361111111111112,
+          "disgusted": 0.9861111111111112,
+          "fearful": 0.8472222222222222,
+          "happy": 0.7222222222222222,
+          "neutral": 0.5694444444444444,
+          "sad": 0.7638888888888888,
+          "surprised": 0.7222222222222222
+        },
+        "gender": {
+          "F": 0.9603174603174603,
+          "M": 0.9166666666666666
+        },
+        "age": {
+          "adult": 0.6746031746031746,
+          "child": 0.9126984126984127,
+          "senior": 0.9047619047619048,
+          "young": 0.5555555555555556
+        }
+      },
+      "support": {
+        "emotion": {
+          "happy": 72,
+          "surprised": 72,
+          "angry": 72,
+          "sad": 72,
+          "neutral": 72,
+          "disgusted": 72,
+          "fearful": 72
+        },
+        "gender": {
+          "F": 252,
+          "M": 252
+        },
+        "age": {
+          "adult": 126,
+          "child": 126,
+          "senior": 126,
+          "young": 126
+        }
+      }
+    }
+  }
+}

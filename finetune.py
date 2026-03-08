@@ -41,6 +41,8 @@ from train import (
     _sigint_handler,
     _unwrap,
     _make_cosine_schedule,
+    set_seed,
+    RANDOM_SEED,
 )
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -71,6 +73,7 @@ FINETUNE_DIR.mkdir(parents=True, exist_ok=True)
 UNFREEZE_TOP_N = 4
 UNFREEZE_FEATURE_PROJ = False
 ANALYZE_ONLY = "--analyze" in sys.argv
+EARLY_STOPPING_PATIENCE = 5
 
 # HuBERT has 13 hidden states: index 0 = feature-projection output,
 # indices 1-12 = transformer encoder layers [0..11].
@@ -319,6 +322,7 @@ def _print_lr_schedule(layer_indices: list[int], backbone_lr_top: float,
 def main() -> None:
     global _stop_requested
     signal.signal(signal.SIGINT, _sigint_handler)
+    set_seed(RANDOM_SEED)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -399,8 +403,12 @@ def main() -> None:
         num_genders=num_genders,
         num_ages=num_ages,
         freeze_backbone=True,  # Start fully frozen; we unfreeze selectively below
+        use_spec_augment=True,  # Stage 2: online SpecAugment on hidden states
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
+
+    if hasattr(model.hubert.config, 'training_drop_path'):
+        model.hubert.config.training_drop_path = 0.1
 
     # ── Unfreeze layers ───────────────────────────────────────────────────────
     unfreeze_layers(
@@ -425,6 +433,7 @@ def main() -> None:
     all_metrics: list[dict] = []
     last_epoch = -1
     start_epoch = 0
+    epochs_without_improvement = 0
 
     if _is_finetune_resume:
         # ckpt is already the finetune checkpoint — restore training state
@@ -472,9 +481,9 @@ def main() -> None:
                               num_workers=4, pin_memory=pin,
                               persistent_workers=True, prefetch_factor=2)
 
-    criterion_emotion = nn.CrossEntropyLoss()
-    criterion_gender  = nn.CrossEntropyLoss()
-    criterion_age     = nn.CrossEntropyLoss()
+    criterion_emotion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion_gender  = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion_age     = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     print(f"\nStarting fine-tuning for {NUM_EPOCHS} epochs. Press Ctrl+C to stop and save.")
 
@@ -531,6 +540,7 @@ def main() -> None:
 
         if val_metrics["total"] < best_val_loss:
             best_val_loss = val_metrics["total"]
+            epochs_without_improvement = 0
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": _unwrap(model).state_dict(),
@@ -542,6 +552,11 @@ def main() -> None:
                 "unfrozen_layers": sorted(layers_to_unfreeze),
             }, best_model_path)
             print(f"  ✓ New best val loss: {best_val_loss:.4f} → saved to {best_model_path.name}")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+                break
 
         # Advance LR schedule and log current LRs (top backbone layer / head)
         scheduler.step()
