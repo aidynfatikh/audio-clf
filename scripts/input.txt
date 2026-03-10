@@ -1,7 +1,65 @@
-M,young,sad: [very sad and gloomy] Бүгін үйге жалғыз қайтатын болдым…
-F,child,happy: [very happy and excited] Жаңа ойыншықты көріп қатты қуанып тұрмын!
-M,adult,angry: [angry and sharp tone] Жұмыс жоспарлары тағы өзгеріп кетті.
-F,young,fearful: [scared and nervous] Қараңғы көшеде жалғыз жүруге аздап қорқамын.
-M,child,surprised: [very surprised and loud] Досым маған күтпеген сыйлық берді!
-F,adult,neutral: [calm and steady voice] Үстел үстіндегі қағаздарды реттеп қойдым.
+# 56 voice lines: 4 age × 2 gender × 7 emotions. Format: GENDER,AGE,EMOTION: [expression] Kazakh text.
+# Child M
+M,child,angry: [frustrated and raised voice, almost shouting] Ойыншығым сынып қойды, қатты ашуландым!
+M,child,disgusted: [grossed out and whiny] Бұл тағамның түсі мен иісі жәнеді!
+M,child,fearful: [scared and trembling] Қараңғы бөлмеде жалғыз қалдым, қорқып тұрмын!
+M,child,happy: [very happy and excited, giggling] Жаңа ойыншықты көріп қатты қуанып тұрмын!
+M,child,neutral: [calm and matter-of-fact] Бүгін бақшада ойнадым.
+M,child,sad: [whiny and tearful] Досым көшіп кетті, өте ұялып тұрмын…
+M,child,surprised: [wide-eyed and loud] Досым маған күтпеген сыйлық берді!
+# Child F
+F,child,angry: [stomping and cross] Менің кітабымды алмайсың, мен ашулымын!
+F,child,disgusted: [squeamish and refusing] Оны жеуге болмайды, іріңдейді!
+F,child,fearful: [nervous and quiet] Айдаһардың қайда екенін білмеймін, қорқамын.
+F,child,happy: [bubbly and delighted] Түнде анамыз бізге әңгіме айтады, қуанамын!
+F,child,neutral: [even and simple] Сыныпта жаңа сабақ оқыдық.
+F,child,sad: [small voice, about to cry] Менің итім жоқ болды, өте қайғылымын…
+F,child,surprised: [gasping and amazed] Вау! Бұл не сондай үлкен!
+# Young M
+M,young,angry: [sharp and irritated] Жұмыс жоспарлары тағы өзгеріп кетті.
 M,young,disgusted: [disgusted and cold tone] Асханадан шыққан иіс ұнамады.
+M,young,fearful: [anxious and tense] Сынақтан қалып қоймаймын деп аздап қорқамын.
+M,young,happy: [warm and cheerful] Бүгін күні көңілді өтті, рақаттаным!
+M,young,neutral: [calm and steady] Кеше кітапханада оқыдым.
+M,young,sad: [very sad and gloomy] Бүгін үйге жалғыз қайтатын болдым…
+M,young,surprised: [astonished and raised pitch] Сен бұл жерде екеніңді білмедім!
+# Young F
+F,young,angry: [firm and annoyed] Осы тағы кешігіп қалдың, менің сабырым таусылды.
+F,young,disgusted: [sarcastic and repulsed] Оның әдеті маған мүлде ұнамайды.
+F,young,fearful: [scared and nervous] Қараңғы көшеде жалғыз жүруге аздап қорқамын.
+F,young,happy: [bright and enthusiastic] Жобам мақұлданды, өте қуаныштымын!
+F,young,neutral: [even and clear] Сабақ кестесін жаңарттым.
+F,young,sad: [melancholic and soft] Ол мені қалдырып кетті, өте қайғылымын…
+F,young,surprised: [breathless and amazed] Бұл шынымен сен бе? Күтпеген едім!
+# Adult M
+M,adult,angry: [controlled but cutting] Мұны қайта қайта түзетуге болмайды, жеткілікті.
+M,adult,disgusted: [dismissive and contemptuous] Осындай әрекетке төтеп беру қиын.
+M,adult,fearful: [worried and low] Жобаның дедлайны жақындады, аздап алаңдаймын.
+M,adult,happy: [satisfied and warm] Жұмыс сәтті аяқталды, көңілім көтерінді.
+M,adult,neutral: [calm and steady voice] Үстел үстіндегі қағаздарды реттеп қойдым.
+M,adult,sad: [heavy and resigned] Ол кетіп кетті, енді бәрі бос сезіледі…
+M,adult,surprised: [taken aback, slight disbelief] Шынымен осылай шешілді ме? Күтпеген едім.
+# Adult F
+F,adult,angry: [stern and direct] Бұл мәселені осылай қалдыруға болмайды.
+F,adult,disgusted: [cold and disapproving] Мұны естігенде дәмі кетті.
+F,adult,fearful: [uneasy and hushed] Жолда жалғыз жүруді қаламаймын, қорқынышты.
+F,adult,happy: [warm and content] Балалар келді, үй толы болды, қуаныштымын.
+F,adult,neutral: [calm and steady voice] Кеңес кездесуі сағат онда басталады.
+F,adult,sad: [quiet and sorrowful] Оны естігенде жүрегім сынды…
+F,adult,surprised: [startled then delighted] Вау, бұл шынымен маған арналған ба?
+# Senior M
+M,senior,angry: [gruff and indignant] Мұны бұрынғы заманда мұндай істемеген едік.
+M,senior,disgusted: [displeased and moralizing] Осы заманның әдеті маған жат.
+M,senior,fearful: [vulnerable and worried] Дәрігерге барғанда нәтижесін білмеймін, қорқамын.
+M,senior,happy: [peaceful and nostalgic] Немерелер келді, көңілім көтерілді.
+M,senior,neutral: [measured and calm] Таңертең газет оқыдым, шай іштім.
+M,senior,sad: [weary and mournful] Ескі досым жоқ болды, өте қайғылы…
+M,senior,surprised: [amazed and slow to process] Ой, бұл қандай жаңалық, күтпеген едім!
+# Senior F
+F,senior,angry: [firm and disappointed] Мұны істеуге болмайды, мен ашулымын.
+F,senior,disgusted: [disapproving and weary] Осындай сөзді естігім келмейді.
+F,senior,fearful: [nervous and frail] Үйде жалғыз қалғанда аздап қорқамын.
+F,senior,happy: [gentle and grateful] Бүгін күн жақсы, балалар звониліп тұрды, қуаныштымын.
+F,senior,neutral: [quiet and even] Күні бойы үй жұмысымен болдым.
+F,senior,sad: [soft and grieving] Есіме келгенде өте ұяламын…
+F,senior,surprised: [delighted and touched] Мені естіп, келдіңдер ме? Күтпеген едім!

@@ -15,6 +15,7 @@ import os
 import re
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 try:
     from dotenv import load_dotenv
@@ -30,31 +31,34 @@ OUTPUT_FORMAT = "pcm_16000"
 STABILITY_CREATIVE = 0.0
 SAMPLE_RATE = 16000
 # (gender, age) -> (voice_id, name). Only young, adult, senior (no child voices).
+# All IDs and names are taken from voices.json.
 VOICE_BY_GENDER_AGE = {
-    ("F", "senior"): ("pMsXgVXv3BLzUgSXRplE", "Serena"),
-    ("F", "young"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),
+    # Female
+    ("F", "young"): ("21m00Tcm4TlvDq8ikWAM", "Rachel"),
     ("F", "adult"): ("9BWtsMINqrJLrRacOk9x", "Aria"),
+    ("F", "senior"): ("RILOU7YmBhvwJGDGjNmP", "Jane"),  # age=old
+    # Male
     ("M", "young"): ("CYw3kZ02Hs0563khs1Fj", "Dave"),
     ("M", "adult"): ("29vD33N1CtxCmqQRPOHJ", "Drew"),
-    ("M", "senior"): ("D38z5RcWu1voky8WS1ja", "Fin"),
+    ("M", "senior"): ("ZQe5CZNOzWyzPSCn5a3c", "James"),  # age=old
 }
 
-# (gender, emotion) -> (voice_id, name). Jeff: gloomy/sad; Pete: angry M; Ivanna: disgust F; Kannada: surprised M.
+# (gender, emotion) -> (voice_id, name), for stronger expressions when available.
+# Do not use library voices: Kannada, Ivanna, Lucy, Pete, Jeff, Poe.
 VOICE_BY_GENDER_EMOTION = {
     ("F", "neutral"): ("LcfcDJNUP1GQjkzn1xUU", "Emily"),
-    ("M", "neutral"): ("onwK4e9ZLuTAKqWW03F9", "Daniel"),
-    ("F", "happy"): ("cgSgspJ2msm6clMCkdW9", "Jessica"),
-    ("M", "happy"): ("CYw3kZ02Hs0563khs1Fj", "Dave"),
+    ("M", "neutral"): ("onwK4e9ZLuTAKqWW03F9", "Daniel - Steady Broadcaster"),
+    ("F", "happy"): ("cgSgspJ2msm6clMCkdW9", "Jessica - Playful, Bright, Warm"),
+    ("M", "happy"): ("bIHbv24MWmeRgasZH58o", "Will - Relaxed Optimist"),
     ("F", "sad"): ("MF3mGyEYCl7XYWbV9V6O", "Elli"),
-    ("M", "sad"): ("k9073AMdU5sAUtPMH1il", "Jeff"),         # Gloomy, Poetic and Sad
-    ("M", "gloomy"): ("k9073AMdU5sAUtPMH1il", "Jeff"),
+    ("M", "sad"): ("flq6f7yk4E4fJM5XTYuZ", "Michael"),
     ("F", "angry"): ("AZnzlk1XvdvUeBnXmlld", "Domi"),
-    ("M", "angry"): ("ChO6kqkVouUn0s7HMunx", "Pete"),
+    ("M", "angry"): ("ODq5zmih8GrVes37Dizd", "Patrick"),  # shouty — not library Poe
     ("F", "fearful"): ("piTKgcLEGmPE4e6mEKli", "Nicole"),
     ("M", "fearful"): ("GBv7mTt0atIp3Br8iCZE", "Thomas"),
     ("F", "surprised"): ("jsCqWAovK2LkecY7zXl4", "Freya"),
-    ("M", "surprised"): ("dzooKAnqL8jJ27zWCzUq", "Kannada"),  # Surprised and Paranoid
-    ("F", "disgusted"): ("gE0owC0H9C8SzfDyIUtB", "Ivanna"),   # Sassy, Condescending
+    ("M", "surprised"): ("bVMeCyTHy58xNoL34h3p", "Jeremy"),
+    ("F", "disgusted"): ("FGY2WhTYpPnrIDTdsKH5", "Laura - Enthusiast, Quirky Attitude"),
     ("M", "disgusted"): ("t0jbNlBVZ17f02VDIeMI", "Jessie"),
 }
 
@@ -96,9 +100,20 @@ def get_client(api_key: str | None = None) -> ElevenLabs:
     return ElevenLabs(api_key=key)
 
 
-def list_voices(client: ElevenLabs):
-    r = client.voices.get_all(show_legacy=True)
-    return r.voices if hasattr(r, "voices") else r
+def list_voices(client: ElevenLabs | None = None, voices_path: Path | None = None):
+    """Load voices from a local JSON file (voices.json), not from the ElevenLabs API.
+
+    The file is expected to be a list of dicts with keys:
+    voice_id, name, category, labels.
+    """
+    if voices_path is None:
+        # Repo root has voices.json; this script lives in scripts/
+        voices_path = Path(__file__).resolve().parent.parent / "voices.json"
+    if not voices_path.exists():
+        raise SystemExit(f"voices.json not found at {voices_path}")
+    raw = json.loads(voices_path.read_text(encoding="utf-8"))
+    # Wrap dicts so the rest of the code can use attribute access.
+    return [SimpleNamespace(**v) for v in raw]
 
 
 def voice_to_dict(v) -> dict:
