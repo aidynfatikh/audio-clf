@@ -8,6 +8,7 @@ single-head (emotion) latest.
 import os
 import json
 import sys
+import argparse
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent
@@ -78,43 +79,49 @@ def _load_models():
     if _models_data is not None:
         return _models_data
 
-    # Multi-head encoders and checkpoints
+    # Multi-head encoders and checkpoints (optional; skip missing files)
+    multi_encoders = None
     enc_path = MODEL_DIR / "label_encoders.json"
-    if not enc_path.exists():
-        raise FileNotFoundError(
-            "Label encoders not found. Run train.py first and save encoders to models/label_encoders.json"
-        )
-    with open(enc_path) as f:
-        multi_encoders = json.load(f)
+    if enc_path.exists():
+        with open(enc_path) as f:
+            multi_encoders = json.load(f)
 
     multi_best_path = MODEL_DIR / "finetune" / "best_model_finetuned.pt"
     multi_latest_path = MODEL_DIR / "finetune" / "latest_checkpoint_finetune.pt"
-    if not multi_best_path.exists():
-        raise FileNotFoundError(f"Multi-head best checkpoint not found: {multi_best_path}")
-    if not multi_latest_path.exists():
-        raise FileNotFoundError(f"Multi-head latest checkpoint not found: {multi_latest_path}")
 
-    # Single-head (emotion) encoders and checkpoints
+    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+
+    multi_best_data = (
+        _load_multi_model(multi_best_path, multi_encoders)
+        if multi_encoders is not None and multi_best_path.exists()
+        else None
+    )
+    multi_latest_data = (
+        _load_multi_model(multi_latest_path, multi_encoders)
+        if multi_encoders is not None and multi_latest_path.exists()
+        else None
+    )
+
+    # Single-head (emotion) encoders and checkpoints (optional; skip missing files)
+    single_encoders = None
     single_enc_path = SINGLE_HEAD_MODEL_DIR / "label_encoders.json"
-    if not single_enc_path.exists():
-        raise FileNotFoundError(
-            f"Single-head label encoders not found. Run: python single_head/train_single.py --feature {SINGLE_HEAD_FEATURE}"
-        )
-    with open(single_enc_path) as f:
-        single_encoders = json.load(f)
+    if single_enc_path.exists():
+        with open(single_enc_path) as f:
+            single_encoders = json.load(f)
 
     single_best_path = SINGLE_HEAD_FINETUNE_DIR / "best_model_finetuned.pt"
     single_latest_path = SINGLE_HEAD_FINETUNE_DIR / "latest_checkpoint_finetune.pt"
-    if not single_best_path.exists():
-        raise FileNotFoundError(f"Single-head best checkpoint not found: {single_best_path}")
-    if not single_latest_path.exists():
-        raise FileNotFoundError(f"Single-head latest checkpoint not found: {single_latest_path}")
 
-    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
-    multi_best_data = _load_multi_model(multi_best_path, multi_encoders)
-    multi_latest_data = _load_multi_model(multi_latest_path, multi_encoders)
-    single_best_data = _load_single_head_model(single_best_path, single_encoders)
-    single_latest_data = _load_single_head_model(single_latest_path, single_encoders)
+    single_best_data = (
+        _load_single_head_model(single_best_path, single_encoders)
+        if single_encoders is not None and single_best_path.exists()
+        else None
+    )
+    single_latest_data = (
+        _load_single_head_model(single_latest_path, single_encoders)
+        if single_encoders is not None and single_latest_path.exists()
+        else None
+    )
 
     _models_data = (
         processor,
@@ -145,6 +152,8 @@ def _process_audio(audio):
 
 def _run_multi_model(model_data, input_values):
     """Run multi-head model. Returns (emotion_dict, gender_dict, age_dict)."""
+    if model_data is None:
+        return {}, {}, {}
     model, id2emotion, id2gender, id2age = model_data
     with torch.no_grad():
         emotion_logits, gender_logits, age_logits = model(input_values)
@@ -162,6 +171,8 @@ def _run_multi_model(model_data, input_values):
 
 def _run_single_head_model(model_data, input_values):
     """Run single-head (emotion) model. Returns emotion_dict only."""
+    if model_data is None:
+        return {}
     model, id2emotion = model_data
     with torch.no_grad():
         logits = model(input_values)
@@ -169,7 +180,7 @@ def _run_single_head_model(model_data, input_values):
     return {id2emotion[i]: round(p.item(), 4) for i, p in enumerate(probs)}
 
 
-def predict(audio):
+def predict_all(audio):
     """Run all 4 models on one audio input.
 
     Returns 8 gr.Label-compatible dicts:
@@ -221,59 +232,122 @@ def predict(audio):
     )
 
 
+def predict_best(audio):
+    """Run only the multi-head best model on one audio input."""
+    (
+        multi_best_e,
+        multi_best_g,
+        multi_best_a,
+        _multi_latest_e,
+        _multi_latest_g,
+        _multi_latest_a,
+        _single_best_e,
+        _single_latest_e,
+    ) = predict_all(audio)
+    return multi_best_e, multi_best_g, multi_best_a
+
+
 def main():
-    _load_models()  # Fail fast if any checkpoint/encoders missing
+    parser = argparse.ArgumentParser(
+        description="Gradio demo for MultiTaskHuBERT and Single-Head HuBERT."
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Show all models (multi-head best/latest and single-head best/latest). "
+            "By default only the multi-head best model is run and displayed."
+        ),
+    )
+    args = parser.parse_args()
 
-    with gr.Blocks(title="HuBERT — Multi-Head & Single-Head") as demo:
-        gr.Markdown("# HuBERT — Multi-Head & Single-Head")
-        gr.Markdown(
-            "Upload or record audio (up to 10 s). **4 models** run inference: "
-            "multi-head best/latest (emotion, gender, age) and single-head (emotion) best/latest."
+    _load_models()  # Populate cache; missing models are skipped gracefully
+
+    title = "HuBERT — Multi-Head & Single-Head"
+    with gr.Blocks(title=title) as demo:
+        gr.Markdown(f"# {title}")
+        if args.all:
+            gr.Markdown(
+                "Upload or record audio (up to 10 s). **4 models** run inference: "
+                "multi-head best/latest (emotion, gender, age) and single-head (emotion) best/latest."
+            )
+        else:
+            gr.Markdown(
+                "Upload or record audio (up to 10 s). "
+                "By default this demo runs only the **multi-head best** model "
+                "(emotion, gender, age). Use `--all` to also run latest and single-head models."
+            )
+
+        audio_input = gr.Audio(
+            sources=["upload", "microphone"], type="numpy", label="Audio Input"
         )
-
-        audio_input = gr.Audio(sources=["upload", "microphone"], type="numpy", label="Audio Input")
         submit_btn = gr.Button("Predict")
 
         with gr.Row():
-            # Column 1: Multi-head best
+            # Column 1: Multi-head best (always shown)
             with gr.Column():
                 gr.Markdown("### Multi-head best")
                 gr.Markdown("`models/finetune/best_model_finetuned.pt`")
                 multi_best_emotion = gr.Label(num_top_classes=7, label="Emotion")
                 multi_best_gender = gr.Label(num_top_classes=4, label="Gender")
                 multi_best_age = gr.Label(num_top_classes=4, label="Age")
-            # Column 2: Multi-head latest
-            with gr.Column():
-                gr.Markdown("### Multi-head latest")
-                gr.Markdown("`models/finetune/latest_checkpoint_finetune.pt`")
-                multi_latest_emotion = gr.Label(num_top_classes=7, label="Emotion")
-                multi_latest_gender = gr.Label(num_top_classes=4, label="Gender")
-                multi_latest_age = gr.Label(num_top_classes=4, label="Age")
-            # Column 3: Single-head best (emotion)
-            with gr.Column():
-                gr.Markdown("### Single-head best (emotion)")
-                gr.Markdown("`single_head/models/emotion/finetune/best_model_finetuned.pt`")
-                single_best_emotion = gr.Label(num_top_classes=7, label="Emotion")
-            # Column 4: Single-head latest (emotion)
-            with gr.Column():
-                gr.Markdown("### Single-head latest (emotion)")
-                gr.Markdown("`single_head/models/emotion/finetune/latest_checkpoint_finetune.pt`")
-                single_latest_emotion = gr.Label(num_top_classes=7, label="Emotion")
 
-        submit_btn.click(
-            fn=predict,
-            inputs=audio_input,
-            outputs=[
-                multi_best_emotion,
-                multi_best_gender,
-                multi_best_age,
-                multi_latest_emotion,
-                multi_latest_gender,
-                multi_latest_age,
-                single_best_emotion,
-                single_latest_emotion,
-            ],
-        )
+            if args.all:
+                # Column 2: Multi-head latest
+                with gr.Column():
+                    gr.Markdown("### Multi-head latest")
+                    gr.Markdown("`models/finetune/latest_checkpoint_finetune.pt`")
+                    multi_latest_emotion = gr.Label(
+                        num_top_classes=7, label="Emotion"
+                    )
+                    multi_latest_gender = gr.Label(
+                        num_top_classes=4, label="Gender"
+                    )
+                    multi_latest_age = gr.Label(num_top_classes=4, label="Age")
+                # Column 3: Single-head best (emotion)
+                with gr.Column():
+                    gr.Markdown("### Single-head best (emotion)")
+                    gr.Markdown(
+                        "`single_head/models/emotion/finetune/best_model_finetuned.pt`"
+                    )
+                    single_best_emotion = gr.Label(
+                        num_top_classes=7, label="Emotion"
+                    )
+                # Column 4: Single-head latest (emotion)
+                with gr.Column():
+                    gr.Markdown("### Single-head latest (emotion)")
+                    gr.Markdown(
+                        "`single_head/models/emotion/finetune/latest_checkpoint_finetune.pt`"
+                    )
+                    single_latest_emotion = gr.Label(
+                        num_top_classes=7, label="Emotion"
+                    )
+
+        if args.all:
+            submit_btn.click(
+                fn=predict_all,
+                inputs=audio_input,
+                outputs=[
+                    multi_best_emotion,
+                    multi_best_gender,
+                    multi_best_age,
+                    multi_latest_emotion,
+                    multi_latest_gender,
+                    multi_latest_age,
+                    single_best_emotion,
+                    single_latest_emotion,
+                ],
+            )
+        else:
+            submit_btn.click(
+                fn=predict_best,
+                inputs=audio_input,
+                outputs=[
+                    multi_best_emotion,
+                    multi_best_gender,
+                    multi_best_age,
+                ],
+            )
 
     demo.launch(share=True)
 
