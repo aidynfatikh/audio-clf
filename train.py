@@ -171,21 +171,55 @@ def _make_cosine_schedule(
     hold_epochs: int,
     decay_epochs: int,
     eta_min_factor: float = 1e-2,
+    scale_group_decay: bool = False,
+    group_power_range: tuple[float, float] = (0.8, 1.2),
 ) -> torch.optim.lr_scheduler.LambdaLR:
     """Hold LR for hold_epochs, then cosine-anneal to eta_min_factor * base_lr.
 
-    Works for any number of param groups — each group's LR is scaled by the
-    same lambda, so relative differences (e.g. layer-decay in finetune) are kept.
+    By default, applies the same multiplier to every param group, preserving
+    relative LR ratios.
+
+    If scale_group_decay=True, each param group gets its own cosine exponent
+    based on its *initial LR*:
+    - higher initial LR  -> larger exponent -> faster decay early
+    - lower initial LR   -> smaller exponent -> slower decay early
+
+    All groups still reach eta_min_factor * base_lr at the end.
     """
-    def lr_lambda(epoch: int) -> float:
+    def base_cosine(epoch: int) -> float:
         if epoch < hold_epochs:
             return 1.0
         # Use (decay_epochs - 1) so the minimum is reached at the very last
         # training epoch rather than one step after it.
         t = min((epoch - hold_epochs) / max(decay_epochs - 1, 1), 1.0)
-        cosine = 0.5 * (1.0 + math.cos(math.pi * t))
-        return eta_min_factor + (1.0 - eta_min_factor) * cosine
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        return 0.5 * (1.0 + math.cos(math.pi * t))
+
+    if not scale_group_decay:
+        def lr_lambda(epoch: int) -> float:
+            c = base_cosine(epoch)
+            return eta_min_factor + (1.0 - eta_min_factor) * c
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    # Per-group exponents based on initial LR rank
+    lrs = [float(g.get("lr", 0.0)) for g in optimizer.param_groups]
+    lo, hi = min(lrs), max(lrs)
+    p_lo, p_hi = group_power_range
+    if hi <= 0 or abs(hi - lo) < 1e-12:
+        powers = [1.0 for _ in lrs]
+    else:
+        # normalise to [0,1] by LR; higher LR -> closer to 1
+        powers = []
+        for lr in lrs:
+            r = (lr - lo) / (hi - lo)
+            powers.append(p_lo + (p_hi - p_lo) * r)
+
+    lambdas = []
+    for p in powers:
+        def _f(epoch: int, _p=p) -> float:
+            c = base_cosine(epoch)
+            return eta_min_factor + (1.0 - eta_min_factor) * (c ** _p)
+        lambdas.append(_f)
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lambdas)
 
 
 class MultiTaskHubert(nn.Module):

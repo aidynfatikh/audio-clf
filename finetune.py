@@ -429,7 +429,15 @@ def main() -> None:
                                 BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
     # LR schedule: hold for 5 epochs, then cosine decay for 15 epochs to 1% of initial LR
     # Applies uniformly across all param groups, preserving their relative layer-decay ratios.
-    scheduler = _make_cosine_schedule(optimizer, hold_epochs=5, decay_epochs=15)
+    # Use per-group decay shaping so high-LR groups can decay faster than low-LR groups
+    # while still reaching the same eta_min_factor * base_lr endpoint.
+    scheduler = _make_cosine_schedule(
+        optimizer,
+        hold_epochs=5,
+        decay_epochs=15,
+        scale_group_decay=True,
+        group_power_range=(0.8, 1.3),
+    )
 
     best_val_loss = float("inf")
     all_metrics: list[dict] = []
