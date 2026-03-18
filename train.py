@@ -95,15 +95,16 @@ def fallback_split_train_val(train_split, *, seed: int = RANDOM_SEED, val_fracti
 
     stratify_col = "emotion" if "emotion" in getattr(train_split, "column_names", []) else None
     kwargs = dict(test_size=val_fraction, seed=seed, shuffle=True)
-    if stratify_col is not None:
-        kwargs["stratify_by_column"] = stratify_col
 
-    try:
-        split = train_split.train_test_split(**kwargs)
-    except TypeError:
-        # Older datasets versions may not support stratify_by_column
-        kwargs.pop("stratify_by_column", None)
-        split = train_split.train_test_split(**kwargs)
+    # Keep it simple: try stratification if supported; otherwise do a plain random split.
+    if stratify_col is not None:
+        try:
+            split = train_split.train_test_split(**(kwargs | {"stratify_by_column": stratify_col}))
+            return split["train"], split["test"]
+        except (TypeError, ValueError):
+            pass
+
+    split = train_split.train_test_split(**kwargs)
     return split["train"], split["test"]
 
 
@@ -273,14 +274,14 @@ class MultiTaskHubert(nn.Module):
             nn.Linear(256, num_ages),
         )
 
-    def forward(self, input_values):
+    def forward(self, input_values, attention_mask=None):
         """
         Args:
             input_values: Audio features [batch_size, sequence_length]
         Returns:
             emotion_logits, gender_logits, age_logits
         """
-        outputs = self.hubert(input_values)
+        outputs = self.hubert(input_values, attention_mask=attention_mask)
 
         # hidden_states: tuple of 13 tensors [batch, time, hidden].
         # When backbone is fully frozen: .detach().clone() saves memory and breaks
@@ -309,13 +310,23 @@ class AudioDataset(Dataset):
     """Dataset for audio classification with emotion, gender, and age_category labels."""
 
     def __init__(self, dataset_split, processor, emotion_encoder, gender_encoder, age_encoder,
-                 max_length=160000):  # 10 seconds at 16kHz
+                 max_length=160000, is_train: bool = False, noise_dir: str | None = None):  # 10 seconds at 16kHz
         self.data = dataset_split
         self.processor = processor
         self.emotion_encoder = emotion_encoder
         self.gender_encoder = gender_encoder
         self.age_encoder = age_encoder
         self.max_length = max_length
+        self.is_train = is_train
+        self.speed_factors = (0.9, 1.0, 1.1)
+        self.speed_prob = 0.8
+        self.noise_prob = 0.5
+        self.snr_db_range = (5.0, 20.0)
+        self._noise_mixer = None
+        if noise_dir:
+            from audio_augment import NoiseMixer
+
+            self._noise_mixer = NoiseMixer.from_dir(noise_dir)
     
     def __len__(self):
         return len(self.data)
@@ -338,6 +349,26 @@ class AudioDataset(Dataset):
         # Ensure mono
         if len(audio_data.shape) > 1:
             audio_data = np.mean(audio_data, axis=1)
+
+        audio_data = audio_data.astype(np.float32, copy=False)
+
+        # ── Simple training-time waveform augmentations ───────────────────────
+        if self.is_train:
+            import random
+            from audio_augment import speed_perturb, mix_at_snr
+
+            # Speed perturbation (cheap, effective)
+            if random.random() < self.speed_prob:
+                factor = random.choice(self.speed_factors)
+                if factor != 1.0:
+                    audio_data = speed_perturb(audio_data, factor)
+
+            # Noise injection from a directory of environmental sounds (e.g. ESC-50)
+            if self._noise_mixer is not None and random.random() < self.noise_prob:
+                noise = self._noise_mixer.sample(len(audio_data))
+                if noise is not None:
+                    snr_db = random.uniform(*self.snr_db_range)
+                    audio_data = mix_at_snr(audio_data, noise, snr_db)
         
         # Truncate or pad to max_length
         if len(audio_data) > self.max_length:
@@ -350,37 +381,35 @@ class AudioDataset(Dataset):
             audio_data,
             sampling_rate=SAMPLE_RATE,
             return_tensors="pt",
-            padding=True
+            padding=True,
+            return_attention_mask=True,
         )
         input_values = inputs.input_values.squeeze(0)
+        attention_mask = getattr(inputs, "attention_mask", None)
+        if attention_mask is not None:
+            attention_mask = attention_mask.squeeze(0)
+        else:
+            # Default collate can't batch None; if a mask isn't returned, treat all
+            # samples as fully valid (we already hard-pad/truncate to max_length).
+            attention_mask = torch.ones(input_values.shape, dtype=torch.long)
         
         # Get labels
-        emotion_raw = row.get('emotion')
-        emotion_normalized = emotion_raw if (emotion_raw is not None and str(emotion_raw).strip()) else 'unknown'
+        def norm(v):
+            return str(v).strip() if (v is not None and str(v).strip()) else "unknown"
 
-        gender_raw = row.get('gender')
-        gender_normalized = gender_raw if (gender_raw is not None and str(gender_raw).strip()) else 'unknown'
+        emotion_normalized = norm(row.get("emotion"))
+        gender_normalized = norm(row.get("gender"))
+        age_normalized = norm(row.get("age_category"))
 
-        age_raw = row.get('age_category')
-        age_normalized = age_raw if (age_raw is not None and str(age_raw).strip()) else 'unknown'
-
-        if 'unknown' in self.emotion_encoder:
-            emotion_label = self.emotion_encoder.get(emotion_normalized, self.emotion_encoder['unknown'])
-        else:
-            emotion_label = self.emotion_encoder[emotion_normalized]
-
-        if 'unknown' in self.gender_encoder:
-            gender_label = self.gender_encoder.get(gender_normalized, self.gender_encoder['unknown'])
-        else:
-            gender_label = self.gender_encoder[gender_normalized]
-
-        if 'unknown' in self.age_encoder:
-            age_label = self.age_encoder.get(age_normalized, self.age_encoder['unknown'])
-        else:
-            age_label = self.age_encoder[age_normalized]
+        # Be robust: even if encoders don't contain "unknown" (perfectly clean dataset),
+        # map unseen labels to 0 instead of crashing mid-epoch.
+        emotion_label = self.emotion_encoder.get(emotion_normalized, self.emotion_encoder.get("unknown", 0))
+        gender_label = self.gender_encoder.get(gender_normalized, self.gender_encoder.get("unknown", 0))
+        age_label = self.age_encoder.get(age_normalized, self.age_encoder.get("unknown", 0))
 
         return {
             'input_values': input_values,
+            'attention_mask': attention_mask,
             'emotion': torch.tensor(emotion_label, dtype=torch.long),
             'gender': torch.tensor(gender_label, dtype=torch.long),
             'age': torch.tensor(age_label, dtype=torch.long)
@@ -448,6 +477,9 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
             break
         # non_blocking=True overlaps H→D transfer with GPU work
         input_values = batch['input_values'].to(device, non_blocking=True)
+        attention_mask = batch.get('attention_mask', None)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device, non_blocking=True)
         emotion_labels = batch['emotion'].to(device, non_blocking=True)
         gender_labels = batch['gender'].to(device, non_blocking=True)
         age_labels = batch['age'].to(device, non_blocking=True)
@@ -456,7 +488,7 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-            emotion_logits, gender_logits, age_logits = model(input_values)
+            emotion_logits, gender_logits, age_logits = model(input_values, attention_mask=attention_mask)
 
             # Compute losses
             loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
@@ -514,12 +546,15 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
             if _stop_requested:
                 break
             input_values = batch['input_values'].to(device, non_blocking=True)
+            attention_mask = batch.get('attention_mask', None)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device, non_blocking=True)
             emotion_labels = batch['emotion'].to(device, non_blocking=True)
             gender_labels = batch['gender'].to(device, non_blocking=True)
             age_labels = batch['age'].to(device, non_blocking=True)
 
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-                emotion_logits, gender_logits, age_logits = model(input_values)
+                emotion_logits, gender_logits, age_logits = model(input_values, attention_mask=attention_mask)
 
                 # Compute losses
                 loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
@@ -622,7 +657,9 @@ def main():
         processor,
         emotion_encoder,
         gender_encoder,
-        age_encoder
+        age_encoder,
+        is_train=True,
+        noise_dir=os.environ.get("NOISE_DIR"),
     )
 
     val_dataset = AudioDataset(
@@ -630,7 +667,9 @@ def main():
         processor,
         emotion_encoder,
         gender_encoder,
-        age_encoder
+        age_encoder,
+        is_train=False,
+        noise_dir=None,
     )
     
     # Create data loaders

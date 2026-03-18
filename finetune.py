@@ -487,8 +487,24 @@ def main() -> None:
     if "audio" in val_split.column_names:
         val_split = val_split.cast_column("audio", Audio(decode=False))
 
-    train_dataset = AudioDataset(train_split, processor, emotion_encoder, gender_encoder, age_encoder)
-    val_dataset   = AudioDataset(val_split, processor, emotion_encoder, gender_encoder, age_encoder)
+    train_dataset = AudioDataset(
+        train_split,
+        processor,
+        emotion_encoder,
+        gender_encoder,
+        age_encoder,
+        is_train=True,
+        noise_dir=os.environ.get("NOISE_DIR"),
+    )
+    val_dataset = AudioDataset(
+        val_split,
+        processor,
+        emotion_encoder,
+        gender_encoder,
+        age_encoder,
+        is_train=False,
+        noise_dir=None,
+    )
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,

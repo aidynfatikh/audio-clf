@@ -40,7 +40,7 @@ from tqdm import tqdm
 import json
 import math
 import random
-
+from audio_augment import speed_perturb, mix_at_snr
 from load_data import load, read_audio
 
 # Feature choices: one head per run
@@ -178,8 +178,8 @@ class SingleHeadHubert(nn.Module):
             nn.Linear(256, num_classes),
         )
 
-    def forward(self, input_values):
-        outputs = self.hubert(input_values)
+    def forward(self, input_values, attention_mask=None):
+        outputs = self.hubert(input_values, attention_mask=attention_mask)
         backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
         if backbone_frozen:
             all_layers = torch.stack(
@@ -195,13 +195,23 @@ class AudioDataset(torch.utils.data.Dataset):
     """Dataset for audio + labels; same as multi-head but we only use one label in the loop."""
 
     def __init__(self, dataset_split, processor, emotion_encoder, gender_encoder, age_encoder,
-                 max_length=160000):
+                 max_length=160000, is_train: bool = False, noise_dir: str | None = None):
         self.data = dataset_split
         self.processor = processor
         self.emotion_encoder = emotion_encoder
         self.gender_encoder = gender_encoder
         self.age_encoder = age_encoder
         self.max_length = max_length
+        self.is_train = is_train
+        self.speed_factors = (0.9, 1.0, 1.1)
+        self.speed_prob = 0.8
+        self.noise_prob = 0.5
+        self.snr_db_range = (5.0, 20.0)
+        self._noise_mixer = None
+        if noise_dir:
+            from audio_augment import NoiseMixer
+
+            self._noise_mixer = NoiseMixer.from_dir(noise_dir)
 
     def __len__(self):
         return len(self.data)
@@ -217,6 +227,19 @@ class AudioDataset(torch.utils.data.Dataset):
             )
         if len(audio_data.shape) > 1:
             audio_data = np.mean(audio_data, axis=1)
+        audio_data = audio_data.astype(np.float32, copy=False)
+
+        if self.is_train:
+            if random.random() < self.speed_prob:
+                factor = random.choice(self.speed_factors)
+                if factor != 1.0:
+                    audio_data = speed_perturb(audio_data, factor)
+
+            if self._noise_mixer is not None and random.random() < self.noise_prob:
+                noise = self._noise_mixer.sample(len(audio_data))
+                if noise is not None:
+                    snr_db = random.uniform(*self.snr_db_range)
+                    audio_data = mix_at_snr(audio_data, noise, snr_db)
         if len(audio_data) > self.max_length:
             audio_data = audio_data[:self.max_length]
         else:
@@ -224,9 +247,14 @@ class AudioDataset(torch.utils.data.Dataset):
 
         inputs = self.processor(
             audio_data, sampling_rate=SAMPLE_RATE,
-            return_tensors="pt", padding=True
+            return_tensors="pt", padding=True, return_attention_mask=True
         )
         input_values = inputs.input_values.squeeze(0)
+        attention_mask = getattr(inputs, "attention_mask", None)
+        if attention_mask is not None:
+            attention_mask = attention_mask.squeeze(0)
+        else:
+            attention_mask = torch.ones(input_values.shape, dtype=torch.long)
 
         def norm(v):
             return v if (v is not None and str(v).strip()) else "unknown"
@@ -247,6 +275,7 @@ class AudioDataset(torch.utils.data.Dataset):
 
         return {
             "input_values": input_values,
+            "attention_mask": attention_mask,
             "emotion": torch.tensor(emotion_label, dtype=torch.long),
             "gender": torch.tensor(gender_label, dtype=torch.long),
             "age": torch.tensor(age_label, dtype=torch.long),
@@ -304,10 +333,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device, feature: str):
         if _stop_requested:
             break
         input_values = batch["input_values"].to(device, non_blocking=True)
+        attention_mask = batch.get("attention_mask", None)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device, non_blocking=True)
         labels = batch[feature].to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-            logits = model(input_values)
+            logits = model(input_values, attention_mask=attention_mask)
             loss = criterion(logits, labels)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
@@ -331,9 +363,12 @@ def validate(model, dataloader, criterion, device, feature: str):
             if _stop_requested:
                 break
             input_values = batch["input_values"].to(device, non_blocking=True)
+            attention_mask = batch.get("attention_mask", None)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device, non_blocking=True)
             labels = batch[feature].to(device, non_blocking=True)
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-                logits = model(input_values)
+                logits = model(input_values, attention_mask=attention_mask)
                 loss = criterion(logits, labels)
             total_loss += loss.item()
             pred = logits.argmax(dim=1)
@@ -392,12 +427,22 @@ def main():
         val_split = val_split.cast_column("audio", Audio(decode=False))
 
     train_dataset = AudioDataset(
-        train_split, processor,
-        emotion_encoder, gender_encoder, age_encoder,
+        train_split,
+        processor,
+        emotion_encoder,
+        gender_encoder,
+        age_encoder,
+        is_train=True,
+        noise_dir=os.environ.get("NOISE_DIR"),
     )
     val_dataset = AudioDataset(
-        val_split or train_split, processor,
-        emotion_encoder, gender_encoder, age_encoder,
+        val_split or train_split,
+        processor,
+        emotion_encoder,
+        gender_encoder,
+        age_encoder,
+        is_train=False,
+        noise_dir=None,
     )
 
     _pin = DEVICE.type == "cuda"
