@@ -36,6 +36,8 @@ from train import (
     MultiTaskHubert,
     AudioDataset,
     build_label_encoders,
+    fallback_split_train_val,
+    VAL_FRACTION,
     train_epoch,
     validate,
     _sigint_handler,
@@ -466,12 +468,19 @@ def main() -> None:
 
     if "audio" in train_split.column_names:
         train_split = train_split.cast_column("audio", Audio(decode=False))
-    if val_split is not None and "audio" in val_split.column_names:
+
+    if val_split is None:
+        print("Warning: No validation split found on HF. Splitting train into train/val "
+              f"(val_fraction={VAL_FRACTION}).")
+        train_split, val_split = fallback_split_train_val(
+            train_split, seed=RANDOM_SEED, val_fraction=VAL_FRACTION
+        )
+
+    if "audio" in val_split.column_names:
         val_split = val_split.cast_column("audio", Audio(decode=False))
 
     train_dataset = AudioDataset(train_split, processor, emotion_encoder, gender_encoder, age_encoder)
-    val_dataset   = (AudioDataset(val_split, processor, emotion_encoder, gender_encoder, age_encoder)
-                     if val_split is not None else train_dataset)
+    val_dataset   = AudioDataset(val_split, processor, emotion_encoder, gender_encoder, age_encoder)
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,

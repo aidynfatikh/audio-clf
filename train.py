@@ -72,6 +72,7 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 _stop_requested = False
 
 RANDOM_SEED = 42
+VAL_FRACTION = 0.1
 
 
 def set_seed(seed: int = RANDOM_SEED) -> None:
@@ -83,6 +84,27 @@ def set_seed(seed: int = RANDOM_SEED) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def fallback_split_train_val(train_split, *, seed: int = RANDOM_SEED, val_fraction: float = VAL_FRACTION):
+    """Create a disjoint (train, val) split from a single HF Dataset."""
+    if train_split is None:
+        raise ValueError("train_split must not be None")
+    if len(train_split) < 2:
+        raise ValueError(f"Not enough rows to split train/val (n={len(train_split)})")
+
+    stratify_col = "emotion" if "emotion" in getattr(train_split, "column_names", []) else None
+    kwargs = dict(test_size=val_fraction, seed=seed, shuffle=True)
+    if stratify_col is not None:
+        kwargs["stratify_by_column"] = stratify_col
+
+    try:
+        split = train_split.train_test_split(**kwargs)
+    except TypeError:
+        # Older datasets versions may not support stratify_by_column
+        kwargs.pop("stratify_by_column", None)
+        split = train_split.train_test_split(**kwargs)
+    return split["train"], split["test"]
 
 
 def _unwrap(model: nn.Module) -> nn.Module:
@@ -546,6 +568,12 @@ def main():
         train_split = train_split.cast_column('audio', Audio(decode=False))
     
     val_split = dataset.get('validation', dataset.get('val', dataset.get('test', None)))
+
+    if val_split is None:
+        print(f"Warning: No validation split found on HF. Splitting train into "
+              f"train/val with val_fraction={VAL_FRACTION}.")
+        train_split, val_split = fallback_split_train_val(train_split, seed=RANDOM_SEED, val_fraction=VAL_FRACTION)
+
     if val_split is not None and 'audio' in val_split.column_names:
         val_split = val_split.cast_column('audio', Audio(decode=False))
     
@@ -557,18 +585,13 @@ def main():
         age_encoder
     )
 
-    if val_split is not None:
-        val_dataset = AudioDataset(
-            val_split,
-            processor,
-            emotion_encoder,
-            gender_encoder,
-            age_encoder
-        )
-    else:
-        val_dataset = None
-        print("Warning: No validation split found. Using train split for validation.")
-        val_dataset = train_dataset
+    val_dataset = AudioDataset(
+        val_split,
+        processor,
+        emotion_encoder,
+        gender_encoder,
+        age_encoder
+    )
     
     # Create data loaders
     # persistent_workers keeps worker processes alive between epochs (avoids fork overhead)

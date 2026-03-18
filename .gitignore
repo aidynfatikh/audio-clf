@@ -16,3 +16,5 @@ el_audios/
 01_hold_lr_run/
 02_warmup_lr_run/
 03_regularized_run/
+models-s
+test
