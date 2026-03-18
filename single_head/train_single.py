@@ -150,10 +150,18 @@ class SingleHeadHubert(nn.Module):
         super().__init__()
         self.feature = feature
         self.num_classes = num_classes
+        # Prefer the model's built-in SpecAugment (masks projected features pre-transformer)
+        # over manually masking post-transformer hidden states.
         self.use_spec_augment = use_spec_augment
         self.hubert = HubertModel.from_pretrained(
             "facebook/hubert-base-ls960", output_hidden_states=True
         )
+        if hasattr(self.hubert, "config"):
+            self.hubert.config.apply_spec_augment = bool(use_spec_augment)
+            self.hubert.config.mask_time_prob = 0.05
+            self.hubert.config.mask_time_length = 10
+            self.hubert.config.mask_feature_prob = 0.0
+            self.hubert.config.mask_feature_length = 10
         if hasattr(self.hubert.config, "training_drop_path"):
             self.hubert.config.training_drop_path = 0.1
         if freeze_backbone:
@@ -179,8 +187,6 @@ class SingleHeadHubert(nn.Module):
             )
         else:
             all_layers = torch.stack(outputs.hidden_states, dim=0)
-        if self.training and self.use_spec_augment:
-            all_layers = _spec_augment(all_layers)
         feats = _weighted_pool(all_layers, self.layer_weights)
         return self.head(feats)
 
