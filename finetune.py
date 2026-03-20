@@ -24,20 +24,16 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from transformers import HubertModel, Wav2Vec2FeatureExtractor
-from datasets import Audio
-import numpy as np
+from transformers import Wav2Vec2FeatureExtractor
 from pathlib import Path
 from tqdm import tqdm
 import json
 
-from load_data import load, read_audio, DATA_DIR
 from train import (
     MultiTaskHubert,
     AudioDataset,
     build_label_encoders,
-    fallback_split_train_val,
-    VAL_FRACTION,
+    build_mixed_train_val_splits,
     train_epoch,
     validate,
     _sigint_handler,
@@ -354,9 +350,10 @@ def main() -> None:
         print("  Also unfreezing: feature_projection")
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    dataset = load()
+    dataset, train_split, val_split, composition = build_mixed_train_val_splits()
+    merged_for_encoders = {"train": train_split, "validation": val_split}
     print("Building label encoders...")
-    emotion_encoder, gender_encoder, age_encoder = build_label_encoders(dataset)
+    emotion_encoder, gender_encoder, age_encoder = build_label_encoders(merged_for_encoders)
     num_emotions = len(emotion_encoder)
     num_genders = len(gender_encoder)
     num_ages = len(age_encoder)
@@ -471,21 +468,19 @@ def main() -> None:
     # ── Processor & datasets ───────────────────────────────────────────────────────
     processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
 
-    train_split = dataset.get("train") or dataset[list(dataset.keys())[0]]
-    val_split   = dataset.get("validation") or dataset.get("val") or dataset.get("test")
-
-    if "audio" in train_split.column_names:
-        train_split = train_split.cast_column("audio", Audio(decode=False))
-
-    if val_split is None:
-        print("Warning: No validation split found on HF. Splitting train into train/val "
-              f"(val_fraction={VAL_FRACTION}).")
-        train_split, val_split = fallback_split_train_val(
-            train_split, seed=RANDOM_SEED, val_fraction=VAL_FRACTION
-        )
-
-    if "audio" in val_split.column_names:
-        val_split = val_split.cast_column("audio", Audio(decode=False))
+    print("Dataset composition:")
+    print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
+    print(f"  Kazemo train/val: {composition['kazemo_train']} / {composition['kazemo_val']}")
+    if composition.get("kazemo_emotion_counts"):
+        emo_counts = ", ".join([f"{k}:{v}" for k, v in composition["kazemo_emotion_counts"].items()])
+        print(f"  Kazemo selected emotion counts: {emo_counts}")
+    print(f"  Mixed train/val total: {composition['train_total']} / {composition['val_total']}")
+    print(f"  Train labels present: emotion={composition['train_label_counts']['emotion']}, "
+          f"gender={composition['train_label_counts']['gender']}, "
+          f"age={composition['train_label_counts']['age']}")
+    print(f"  Val labels present: emotion={composition['val_label_counts']['emotion']}, "
+          f"gender={composition['val_label_counts']['gender']}, "
+          f"age={composition['val_label_counts']['age']}")
 
     train_dataset = AudioDataset(
         train_split,

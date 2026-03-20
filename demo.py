@@ -248,12 +248,8 @@ def predict_best(audio):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Gradio demo for MultiTaskHuBERT and Single-Head HuBERT."
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
+    parser = argparse.ArgumentParser(description="Gradio demo for MultiTaskHuBERT and Single-Head HuBERT.")
+    parser.add_argument("--all", action="store_true",
         help=(
             "Show all models (multi-head best/latest and single-head best/latest). "
             "By default only the multi-head best model is run and displayed."

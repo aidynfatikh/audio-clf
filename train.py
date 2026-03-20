@@ -28,7 +28,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from transformers import HubertModel, Wav2Vec2FeatureExtractor
-from datasets import Audio
+from datasets import Audio, DatasetDict, Features, Value, concatenate_datasets
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -38,6 +38,7 @@ import random
 
 # Import load_data (warnings already suppressed in load_data.py)
 from load_data import load, read_audio, DATA_DIR
+from kazemo.load_data import load_kazemotts
 
 # Configuration
 BATCH_SIZE = 8
@@ -73,6 +74,9 @@ _stop_requested = False
 
 RANDOM_SEED = 42
 VAL_FRACTION = 0.1
+KAZEMO_MAX_SAMPLES = int(os.environ.get("KAZEMO_MAX_SAMPLES", "20000"))
+KAZEMO_VAL_FRACTION = float(os.environ.get("KAZEMO_VAL_FRACTION", "0.1"))
+USE_KAZEMO = os.environ.get("USE_KAZEMO", "1").strip().lower() not in {"0", "false", "no"}
 
 
 def set_seed(seed: int = RANDOM_SEED) -> None:
@@ -106,6 +110,131 @@ def fallback_split_train_val(train_split, *, seed: int = RANDOM_SEED, val_fracti
 
     split = train_split.train_test_split(**kwargs)
     return split["train"], split["test"]
+
+
+def _ensure_label_columns(split):
+    """Ensure split has emotion/gender/age_category columns for mixed datasets."""
+    needed = ("emotion", "gender", "age_category")
+    missing = [c for c in needed if c not in split.column_names]
+    if missing:
+        def _inject_missing(row):
+            for c in missing:
+                row[c] = None
+            return row
+        split = split.map(_inject_missing, desc=f"Injecting missing columns: {','.join(missing)}")
+    return split
+
+
+def _prepare_split_for_training(split):
+    """Cast audio column and align label columns for downstream dataset."""
+    if "audio" in split.column_names:
+        split = split.cast_column("audio", Audio(decode=False))
+    return _ensure_label_columns(split)
+
+
+def _force_canonical_label_schema(split, reference_split=None):
+    """Normalize columns and cast labels; optionally align exactly to reference features."""
+    keep_cols = ["audio", "emotion", "gender", "age_category"]
+    split = split.select_columns(keep_cols)
+    if reference_split is not None:
+        # Match reference dtypes exactly (e.g., large_string vs string/null).
+        return split.cast(reference_split.features)
+
+    audio_feature = split.features["audio"] if "audio" in split.features else Audio(decode=False)
+    target_features = Features({
+        "audio": audio_feature,
+        "emotion": Value("string"),
+        "gender": Value("string"),
+        "age_category": Value("string"),
+    })
+    return split.cast(target_features)
+
+
+def _count_label_presence(split):
+    """Count non-empty labels per task in a split."""
+    counts = {"emotion": 0, "gender": 0, "age": 0}
+
+    def _present(v):
+        return v is not None and str(v).strip() != ""
+
+    split_no_audio = split.remove_columns(['audio']) if 'audio' in split.column_names else split
+    for row in split_no_audio:
+        if _present(row.get("emotion")):
+            counts["emotion"] += 1
+        if _present(row.get("gender")):
+            counts["gender"] += 1
+        if _present(row.get("age_category")):
+            counts["age"] += 1
+    return counts
+
+
+def _count_emotion_distribution(split):
+    counts = {}
+    split_no_audio = split.remove_columns(['audio']) if 'audio' in split.column_names else split
+    for row in split_no_audio:
+        emo = row.get("emotion")
+        if emo is None:
+            continue
+        emo = str(emo).strip()
+        if not emo:
+            continue
+        counts[emo] = counts.get(emo, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: kv[0]))
+
+
+def build_mixed_train_val_splits():
+    """Build train/val splits using full HF data and optional capped Kazemo data."""
+    hf_dataset = load()
+    hf_train = hf_dataset.get("train")
+    if hf_train is None:
+        hf_train = hf_dataset[list(hf_dataset.keys())[0]]
+
+    hf_val = hf_dataset.get('validation', hf_dataset.get('val', hf_dataset.get('test', None)))
+    if hf_val is None:
+        print(f"Warning: No validation split found on HF. Splitting train into "
+              f"train/val with val_fraction={VAL_FRACTION}.")
+        hf_train, hf_val = fallback_split_train_val(hf_train, seed=RANDOM_SEED, val_fraction=VAL_FRACTION)
+
+    hf_train = _force_canonical_label_schema(_prepare_split_for_training(hf_train))
+    hf_val = _force_canonical_label_schema(_prepare_split_for_training(hf_val))
+
+    train_split = hf_train
+    val_split = hf_val
+    kazemo_train_count = 0
+    kazemo_val_count = 0
+    kazemo_emotion_counts = {}
+
+    if USE_KAZEMO:
+        print(f"Loading Kazemo dataset (max_samples={KAZEMO_MAX_SAMPLES})...")
+        kz_ds: DatasetDict = load_kazemotts(cache_dir=str(DATA_DIR), max_samples=KAZEMO_MAX_SAMPLES)
+        kz_base = kz_ds.get("train", kz_ds[list(kz_ds.keys())[0]])
+        kz_base = _prepare_split_for_training(kz_base)
+        kz_split = kz_base.train_test_split(
+            test_size=KAZEMO_VAL_FRACTION,
+            seed=RANDOM_SEED,
+            shuffle=True,
+        )
+        kz_train = _force_canonical_label_schema(_prepare_split_for_training(kz_split["train"]), reference_split=hf_train)
+        kz_val = _force_canonical_label_schema(_prepare_split_for_training(kz_split["test"]), reference_split=hf_val)
+        kazemo_train_count = len(kz_train)
+        kazemo_val_count = len(kz_val)
+        kazemo_emotion_counts = _count_emotion_distribution(kz_base)
+
+        train_split = concatenate_datasets([hf_train, kz_train])
+        val_split = concatenate_datasets([hf_val, kz_val])
+
+    composition = {
+        "hf_train": len(hf_train),
+        "hf_val": len(hf_val),
+        "kazemo_train": kazemo_train_count,
+        "kazemo_val": kazemo_val_count,
+        "kazemo_emotion_counts": kazemo_emotion_counts,
+        "train_total": len(train_split),
+        "val_total": len(val_split),
+        "train_label_counts": _count_label_presence(train_split),
+        "val_label_counts": _count_label_presence(val_split),
+    }
+    return hf_dataset, train_split, val_split, composition
 
 
 def _unwrap(model: nn.Module) -> nn.Module:
@@ -395,24 +524,30 @@ class AudioDataset(Dataset):
         
         # Get labels
         def norm(v):
-            return str(v).strip() if (v is not None and str(v).strip()) else "unknown"
+            return str(v).strip() if (v is not None and str(v).strip()) else None
 
         emotion_normalized = norm(row.get("emotion"))
         gender_normalized = norm(row.get("gender"))
         age_normalized = norm(row.get("age_category"))
 
-        # Be robust: even if encoders don't contain "unknown" (perfectly clean dataset),
-        # map unseen labels to 0 instead of crashing mid-epoch.
-        emotion_label = self.emotion_encoder.get(emotion_normalized, self.emotion_encoder.get("unknown", 0))
-        gender_label = self.gender_encoder.get(gender_normalized, self.gender_encoder.get("unknown", 0))
-        age_label = self.age_encoder.get(age_normalized, self.age_encoder.get("unknown", 0))
+        has_emotion = emotion_normalized is not None
+        has_gender = gender_normalized is not None
+        has_age = age_normalized is not None
+
+        # Sentinel -100 is ignored by masked training loops for missing labels.
+        emotion_label = self.emotion_encoder.get(emotion_normalized, -100) if has_emotion else -100
+        gender_label = self.gender_encoder.get(gender_normalized, -100) if has_gender else -100
+        age_label = self.age_encoder.get(age_normalized, -100) if has_age else -100
 
         return {
             'input_values': input_values,
             'attention_mask': attention_mask,
             'emotion': torch.tensor(emotion_label, dtype=torch.long),
             'gender': torch.tensor(gender_label, dtype=torch.long),
-            'age': torch.tensor(age_label, dtype=torch.long)
+            'age': torch.tensor(age_label, dtype=torch.long),
+            'has_emotion': torch.tensor(has_emotion, dtype=torch.bool),
+            'has_gender': torch.tensor(has_gender, dtype=torch.bool),
+            'has_age': torch.tensor(has_age, dtype=torch.bool),
         }
 
 
@@ -466,6 +601,9 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
     emotion_loss_sum = 0.0
     gender_loss_sum = 0.0
     age_loss_sum = 0.0
+    emotion_loss_batches = 0
+    gender_loss_batches = 0
+    age_loss_batches = 0
     num_batches = 0
 
     # BF16 autocast — only when the GPU actually supports it
@@ -483,6 +621,9 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
         emotion_labels = batch['emotion'].to(device, non_blocking=True)
         gender_labels = batch['gender'].to(device, non_blocking=True)
         age_labels = batch['age'].to(device, non_blocking=True)
+        has_emotion = batch['has_emotion'].to(device, non_blocking=True)
+        has_gender = batch['has_gender'].to(device, non_blocking=True)
+        has_age = batch['has_age'].to(device, non_blocking=True)
 
         # set_to_none avoids a memset; faster than zeroing
         optimizer.zero_grad(set_to_none=True)
@@ -490,17 +631,30 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
             emotion_logits, gender_logits, age_logits = model(input_values, attention_mask=attention_mask)
 
-            # Compute losses
-            loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
-            loss_gender = criterion_gender(gender_logits, gender_labels)
-            loss_age = criterion_age(age_logits, age_labels)
+            per_task_losses = {}
+            active_weight = 0.0
+            total_batch_loss = torch.zeros((), device=device)
 
-            # Combined loss
-            total_batch_loss = (
-                EMOTION_WEIGHT * loss_emotion +
-                GENDER_WEIGHT * loss_gender +
-                AGE_WEIGHT * loss_age
-            )
+            if has_emotion.any():
+                loss_emotion = criterion_emotion(emotion_logits[has_emotion], emotion_labels[has_emotion])
+                per_task_losses['emotion'] = loss_emotion
+                total_batch_loss = total_batch_loss + EMOTION_WEIGHT * loss_emotion
+                active_weight += EMOTION_WEIGHT
+            if has_gender.any():
+                loss_gender = criterion_gender(gender_logits[has_gender], gender_labels[has_gender])
+                per_task_losses['gender'] = loss_gender
+                total_batch_loss = total_batch_loss + GENDER_WEIGHT * loss_gender
+                active_weight += GENDER_WEIGHT
+            if has_age.any():
+                loss_age = criterion_age(age_logits[has_age], age_labels[has_age])
+                per_task_losses['age'] = loss_age
+                total_batch_loss = total_batch_loss + AGE_WEIGHT * loss_age
+                active_weight += AGE_WEIGHT
+
+            if active_weight > 0.0:
+                total_batch_loss = total_batch_loss / active_weight
+            else:
+                continue
 
         total_batch_loss.backward()
         # Clip gradients before step (guards against spikes in unfrozen layers)
@@ -508,18 +662,27 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
         optimizer.step()
 
         total_loss += total_batch_loss.item()
-        emotion_loss_sum += loss_emotion.item()
-        gender_loss_sum += loss_gender.item()
-        age_loss_sum += loss_age.item()
+        emotion_loss_sum += float(per_task_losses['emotion'].item()) if 'emotion' in per_task_losses else 0.0
+        gender_loss_sum += float(per_task_losses['gender'].item()) if 'gender' in per_task_losses else 0.0
+        age_loss_sum += float(per_task_losses['age'].item()) if 'age' in per_task_losses else 0.0
+        emotion_loss_batches += 1 if 'emotion' in per_task_losses else 0
+        gender_loss_batches += 1 if 'gender' in per_task_losses else 0
+        age_loss_batches += 1 if 'age' in per_task_losses else 0
         num_batches += 1
 
     if num_batches == 0:
         num_batches = 1
+    if emotion_loss_batches == 0:
+        emotion_loss_batches = 1
+    if gender_loss_batches == 0:
+        gender_loss_batches = 1
+    if age_loss_batches == 0:
+        age_loss_batches = 1
     return {
         'total': total_loss / num_batches,
-        'emotion': emotion_loss_sum / num_batches,
-        'gender': gender_loss_sum / num_batches,
-        'age': age_loss_sum / num_batches
+        'emotion': emotion_loss_sum / emotion_loss_batches,
+        'gender': gender_loss_sum / gender_loss_batches,
+        'age': age_loss_sum / age_loss_batches
     }, _stop_requested
 
 
@@ -532,11 +695,16 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
     emotion_loss_sum = 0.0
     gender_loss_sum = 0.0
     age_loss_sum = 0.0
+    emotion_loss_batches = 0
+    gender_loss_batches = 0
+    age_loss_batches = 0
     
     emotion_correct = 0
     gender_correct = 0
     age_correct = 0
-    total_samples = 0
+    emotion_samples = 0
+    gender_samples = 0
+    age_samples = 0
     num_batches = 0
 
     _use_bf16 = device.type == 'cuda' and torch.cuda.is_bf16_supported()
@@ -552,49 +720,83 @@ def validate(model, dataloader, criterion_emotion, criterion_gender,
             emotion_labels = batch['emotion'].to(device, non_blocking=True)
             gender_labels = batch['gender'].to(device, non_blocking=True)
             age_labels = batch['age'].to(device, non_blocking=True)
+            has_emotion = batch['has_emotion'].to(device, non_blocking=True)
+            has_gender = batch['has_gender'].to(device, non_blocking=True)
+            has_age = batch['has_age'].to(device, non_blocking=True)
 
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
                 emotion_logits, gender_logits, age_logits = model(input_values, attention_mask=attention_mask)
 
-                # Compute losses
-                loss_emotion = criterion_emotion(emotion_logits, emotion_labels)
-                loss_gender = criterion_gender(gender_logits, gender_labels)
-                loss_age = criterion_age(age_logits, age_labels)
+                per_task_losses = {}
+                active_weight = 0.0
+                total_batch_loss = torch.zeros((), device=device)
 
-                total_batch_loss = (
-                    EMOTION_WEIGHT * loss_emotion +
-                    GENDER_WEIGHT * loss_gender +
-                    AGE_WEIGHT * loss_age
-                )
+                if has_emotion.any():
+                    loss_emotion = criterion_emotion(emotion_logits[has_emotion], emotion_labels[has_emotion])
+                    per_task_losses['emotion'] = loss_emotion
+                    total_batch_loss = total_batch_loss + EMOTION_WEIGHT * loss_emotion
+                    active_weight += EMOTION_WEIGHT
+                if has_gender.any():
+                    loss_gender = criterion_gender(gender_logits[has_gender], gender_labels[has_gender])
+                    per_task_losses['gender'] = loss_gender
+                    total_batch_loss = total_batch_loss + GENDER_WEIGHT * loss_gender
+                    active_weight += GENDER_WEIGHT
+                if has_age.any():
+                    loss_age = criterion_age(age_logits[has_age], age_labels[has_age])
+                    per_task_losses['age'] = loss_age
+                    total_batch_loss = total_batch_loss + AGE_WEIGHT * loss_age
+                    active_weight += AGE_WEIGHT
+
+                if active_weight > 0.0:
+                    total_batch_loss = total_batch_loss / active_weight
+                else:
+                    continue
 
             total_loss += total_batch_loss.item()
-            emotion_loss_sum += loss_emotion.item()
-            gender_loss_sum += loss_gender.item()
-            age_loss_sum += loss_age.item()
+            emotion_loss_sum += float(per_task_losses['emotion'].item()) if 'emotion' in per_task_losses else 0.0
+            gender_loss_sum += float(per_task_losses['gender'].item()) if 'gender' in per_task_losses else 0.0
+            age_loss_sum += float(per_task_losses['age'].item()) if 'age' in per_task_losses else 0.0
+            emotion_loss_batches += 1 if 'emotion' in per_task_losses else 0
+            gender_loss_batches += 1 if 'gender' in per_task_losses else 0
+            age_loss_batches += 1 if 'age' in per_task_losses else 0
 
             # Compute accuracy
-            emotion_pred = torch.argmax(emotion_logits, dim=1)
-            gender_pred = torch.argmax(gender_logits, dim=1)
-            age_pred = torch.argmax(age_logits, dim=1)
-
-            emotion_correct += (emotion_pred == emotion_labels).sum().item()
-            gender_correct += (gender_pred == gender_labels).sum().item()
-            age_correct += (age_pred == age_labels).sum().item()
-            total_samples += emotion_labels.size(0)
+            if has_emotion.any():
+                emotion_pred = torch.argmax(emotion_logits[has_emotion], dim=1)
+                emotion_correct += (emotion_pred == emotion_labels[has_emotion]).sum().item()
+                emotion_samples += int(has_emotion.sum().item())
+            if has_gender.any():
+                gender_pred = torch.argmax(gender_logits[has_gender], dim=1)
+                gender_correct += (gender_pred == gender_labels[has_gender]).sum().item()
+                gender_samples += int(has_gender.sum().item())
+            if has_age.any():
+                age_pred = torch.argmax(age_logits[has_age], dim=1)
+                age_correct += (age_pred == age_labels[has_age]).sum().item()
+                age_samples += int(has_age.sum().item())
             num_batches += 1
 
     if num_batches == 0:
         num_batches = 1
-    if total_samples == 0:
-        total_samples = 1
+    if emotion_loss_batches == 0:
+        emotion_loss_batches = 1
+    if gender_loss_batches == 0:
+        gender_loss_batches = 1
+    if age_loss_batches == 0:
+        age_loss_batches = 1
+    if emotion_samples == 0:
+        emotion_samples = 1
+    if gender_samples == 0:
+        gender_samples = 1
+    if age_samples == 0:
+        age_samples = 1
     return {
         'total': total_loss / num_batches,
-        'emotion': emotion_loss_sum / num_batches,
-        'gender': gender_loss_sum / num_batches,
-        'age': age_loss_sum / num_batches,
-        'emotion_acc': emotion_correct / total_samples,
-        'gender_acc': gender_correct / total_samples,
-        'age_acc': age_correct / total_samples
+        'emotion': emotion_loss_sum / emotion_loss_batches,
+        'gender': gender_loss_sum / gender_loss_batches,
+        'age': age_loss_sum / age_loss_batches,
+        'emotion_acc': emotion_correct / emotion_samples,
+        'gender_acc': gender_correct / gender_samples,
+        'age_acc': age_correct / age_samples
     }
 
 
@@ -605,12 +807,13 @@ def main():
     print(f"Using device: {DEVICE}")
     print("Press Ctrl+C to stop training and save a checkpoint.")
 
-    # Load dataset
-    dataset = load()
+    # Load dataset and construct mixed HF+Kazemo train/val splits
+    dataset, train_split, val_split, composition = build_mixed_train_val_splits()
+    merged_for_encoders = DatasetDict({"train": train_split, "validation": val_split})
     
     # Build label encoders
     print("Building label encoders...")
-    emotion_encoder, gender_encoder, age_encoder = build_label_encoders(dataset)
+    emotion_encoder, gender_encoder, age_encoder = build_label_encoders(merged_for_encoders)
     num_emotions = len(emotion_encoder)
     num_genders = len(gender_encoder)
     num_ages = len(age_encoder)
@@ -632,25 +835,20 @@ def main():
     # Initialize feature extractor
     processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
     
-    # Create datasets (disable automatic audio decoding)
-    train_split = dataset.get('train', dataset.get('train', None))
-    if train_split is None:
-        # If no train split, use the first available split
-        train_split = dataset[list(dataset.keys())[0]]
-    
-    # Disable automatic audio decoding (we handle it manually with read_audio)
-    if 'audio' in train_split.column_names:
-        train_split = train_split.cast_column('audio', Audio(decode=False))
-    
-    val_split = dataset.get('validation', dataset.get('val', dataset.get('test', None)))
-
-    if val_split is None:
-        print(f"Warning: No validation split found on HF. Splitting train into "
-              f"train/val with val_fraction={VAL_FRACTION}.")
-        train_split, val_split = fallback_split_train_val(train_split, seed=RANDOM_SEED, val_fraction=VAL_FRACTION)
-
-    if val_split is not None and 'audio' in val_split.column_names:
-        val_split = val_split.cast_column('audio', Audio(decode=False))
+    print("Dataset composition:")
+    print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
+    print(f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
+          f"{composition['kazemo_train']} / {composition['kazemo_val']}")
+    if composition.get("kazemo_emotion_counts"):
+        emo_counts = ", ".join([f"{k}:{v}" for k, v in composition["kazemo_emotion_counts"].items()])
+        print(f"  Kazemo selected emotion counts: {emo_counts}")
+    print(f"  Mixed train/val total: {composition['train_total']} / {composition['val_total']}")
+    print(f"  Train labels present: emotion={composition['train_label_counts']['emotion']}, "
+          f"gender={composition['train_label_counts']['gender']}, "
+          f"age={composition['train_label_counts']['age']}")
+    print(f"  Val labels present: emotion={composition['val_label_counts']['emotion']}, "
+          f"gender={composition['val_label_counts']['gender']}, "
+          f"age={composition['val_label_counts']['age']}")
     
     train_dataset = AudioDataset(
         train_split,

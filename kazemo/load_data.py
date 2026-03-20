@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,59 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _extract_emotion_from_name(name: str) -> str | None:
+    """Extract normalized emotion token from an archive/file name."""
+    parts = re.split(r"[_\W]+", Path(name).name.lower())
+    for tok in parts:
+        if tok in _EMO_MAP:
+            return _EMO_MAP[tok]
+    return None
+
+
+def _select_balanced_members(members: list[str], max_samples: int | None) -> list[tuple[str, str]]:
+    """
+    Return [(member_name, emotion)] with balanced sampling across emotions.
+
+    Sampling is deterministic for reproducibility:
+      - files are grouped by emotion using filename parsing
+      - each group sorted lexicographically
+      - round-robin across emotions until max_samples (or groups exhausted)
+    """
+    by_emotion: dict[str, list[str]] = {}
+    for member in members:
+        emo = _extract_emotion_from_name(member)
+        if emo is None:
+            continue
+        by_emotion.setdefault(emo, []).append(member)
+
+    if not by_emotion:
+        return []
+
+    for emo in by_emotion:
+        by_emotion[emo].sort()
+
+    emotions = sorted(by_emotion.keys())
+    if max_samples is None or max_samples <= 0:
+        max_samples = sum(len(v) for v in by_emotion.values())
+
+    selected: list[tuple[str, str]] = []
+    idx = {emo: 0 for emo in emotions}
+    while len(selected) < max_samples:
+        progressed = False
+        for emo in emotions:
+            i = idx[emo]
+            pool = by_emotion[emo]
+            if i < len(pool):
+                selected.append((pool[i], emo))
+                idx[emo] = i + 1
+                progressed = True
+                if len(selected) >= max_samples:
+                    break
+        if not progressed:
+            break
+    return selected
+
+
 def _load_from_zip_fallback(cache_dir: str | None, max_samples: int | None) -> DatasetDict:
     """
     Fallback loader for when HF `datasets` mistakenly routes this repo through the
@@ -66,8 +120,9 @@ def _load_from_zip_fallback(cache_dir: str | None, max_samples: int | None) -> D
     Strategy:
       - snapshot_download the dataset repo
       - find the biggest .zip file
-      - extract it once into cache_dir
-      - build a Dataset from discovered audio files (emotion derived from filename)
+      - select a balanced subset by emotion from archive members
+      - extract only selected files into cache_dir
+      - build a Dataset from selected files
     """
     from huggingface_hub import snapshot_download
     from datasets import Dataset
@@ -75,8 +130,7 @@ def _load_from_zip_fallback(cache_dir: str | None, max_samples: int | None) -> D
     _log("Loading KazEmoTTS from zip (skip load_dataset)...")
     base_cache = Path(cache_dir) if cache_dir else (Path.home() / ".cache" / "huggingface")
     repo_dir = base_cache / "kazemo" / "repo"
-    extracted_dir = base_cache / "kazemo" / "extracted"
-    extracted_marker = extracted_dir / ".extracted.ok"
+    extracted_dir = base_cache / "kazemo" / "extracted_partial"
 
     repo_dir.mkdir(parents=True, exist_ok=True)
     extracted_dir.mkdir(parents=True, exist_ok=True)
@@ -96,27 +150,34 @@ def _load_from_zip_fallback(cache_dir: str | None, max_samples: int | None) -> D
     zip_path = zips[0]
     _log(f"Found {zip_path.name} ({zip_path.stat().st_size / 1e9:.1f} GB).")
 
-    if not extracted_marker.exists():
-        _log("Extracting zip (this may take several minutes)...")
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(extracted_dir)
-        extracted_marker.write_text(str(zip_path), encoding="utf-8")
-        _log("Extraction done.")
-    else:
-        _log("Using already-extracted files.")
-
-    _log("Scanning for audio files...")
     audio_exts = {".wav", ".flac", ".mp3", ".ogg", ".m4a"}
-    audio_files = [p for p in extracted_dir.rglob("*") if p.suffix.lower() in audio_exts]
-    if not audio_files:
-        raise RuntimeError(f"Extracted {zip_path} but found no audio files in {extracted_dir}")
+    _log("Indexing zip members and selecting balanced subset...")
+    with zipfile.ZipFile(zip_path) as zf:
+        audio_members = [
+            name for name in zf.namelist()
+            if not name.endswith("/") and Path(name).suffix.lower() in audio_exts
+        ]
+        if not audio_members:
+            raise RuntimeError(f"Zip {zip_path} contains no audio members.")
 
-    audio_files = sorted(audio_files)
-    if max_samples is not None and max_samples > 0:
-        audio_files = audio_files[: min(max_samples, len(audio_files))]
-    _log(f"Using {len(audio_files)} audio files.")
+        selected = _select_balanced_members(audio_members, max_samples=max_samples)
+        if not selected:
+            raise RuntimeError("Could not infer emotion labels from zip member names.")
 
-    ds = Dataset.from_dict({"audio": [str(p) for p in audio_files]})
+        _log(f"Selected {len(selected)} files (balanced by emotion).")
+        selected_paths: list[str] = []
+        selected_emotions: list[str] = []
+        for member_name, emo in selected:
+            target_path = extracted_dir / member_name
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            if not target_path.exists() or target_path.stat().st_size == 0:
+                with zf.open(member_name) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+            selected_paths.append(str(target_path))
+            selected_emotions.append(emo)
+
+    _log(f"Prepared {len(selected_paths)} extracted audio files.")
+    ds = Dataset.from_dict({"audio": selected_paths, "emotion": selected_emotions})
     ds = ds.cast_column("audio", Audio(decode=False))
     return DatasetDict({"train": ds})
 
@@ -128,7 +189,8 @@ def load_kazemotts(cache_dir: str | None = None, max_samples: int | None = None)
     # we fall back to downloading/extracting the zip and enumerating audio files.
     #
     # Important: if max_samples is set, we skip the `load_dataset` path entirely
-    # to avoid building a huge (and sometimes broken) intermediate "text" split.
+    # to avoid building a huge (and sometimes broken) intermediate "text" split,
+    # while enforcing balanced per-emotion sampling via zip fallback.
     if max_samples is not None and max_samples > 0:
         ds = _load_from_zip_fallback(cache_dir, max_samples)
     else:
@@ -146,6 +208,8 @@ def load_kazemotts(cache_dir: str | None = None, max_samples: int | None = None)
                 ds = _load_from_zip_fallback(cache_dir, max_samples)
 
     def _add_emotion(example: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(example.get("emotion"), str) and example.get("emotion"):
+            return example
         emo = _extract_emotion(example)
         if emo is None:
             raise ValueError("Could not extract emotion from row (missing/unknown format).")
