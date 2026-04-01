@@ -404,7 +404,9 @@ def main() -> None:
     # but repeated here for clarity when running finetune.py standalone)
     if device.type == 'cuda':
         torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
+        # Keep parity with train.py: fixed-length padded inputs do not benefit
+        # from benchmark probing and it can add startup latency / VRAM overhead.
+        torch.backends.cudnn.benchmark = False
         torch.set_float32_matmul_precision('high')
 
     # ── Layer analysis ────────────────────────────────────────────────────────
@@ -640,7 +642,8 @@ def main() -> None:
     if device.type == 'cuda' and hasattr(torch, 'compile'):
         try:
             print("Compiling model with torch.compile(mode='default')...")
-            model = torch.compile(model, mode='default', dynamic=False)
+            # Match stage-1 compile policy to minimize avoidable recompiles.
+            model = torch.compile(model, mode='default', dynamic=None)
         except Exception as e:
             print(f"  torch.compile unavailable ({e}), running eager.")
 
