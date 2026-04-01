@@ -43,6 +43,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--commit-message", default="Upload model export package", help="Commit message")
     parser.add_argument("--include-metrics", action="store_true", help="Include metrics JSON in upload package")
     parser.add_argument(
+        "--model-card-path",
+        default="",
+        help="Optional custom model card template path. If set, this content becomes README.md",
+    )
+    parser.add_argument(
+        "--metrics-path",
+        default="",
+        help="Optional explicit metrics JSON path (overrides auto-detection)",
+    )
+    parser.add_argument(
+        "--label-encoders-path",
+        default="models/label_encoders.json",
+        help="Path to label_encoders.json for the selected model",
+    )
+    parser.add_argument(
         "--tags",
         default="audio-classification,multi-task,hubert",
         help="Comma-separated model tags for model card",
@@ -78,7 +93,26 @@ def read_label_encoders() -> dict:
         return json.load(f)
 
 
-def resolve_metrics_path(checkpoint_path: Path) -> Path | None:
+def read_label_encoders_from_path(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def resolve_optional_path(path_str: str) -> Path | None:
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return p
+
+
+def resolve_metrics_path(checkpoint_path: Path, explicit_metrics_path: str = "") -> Path | None:
+    explicit = resolve_optional_path(explicit_metrics_path)
+    if explicit is not None:
+        return explicit if explicit.exists() else None
     if "finetune" in str(checkpoint_path):
         p = FINETUNE_DIR / "training_metrics_finetune.json"
     else:
@@ -137,6 +171,29 @@ PyTorch checkpoint package exported from the `audio-clf` project.
 """
 
 
+def build_model_card_from_template(
+    template_path: Path,
+    *,
+    repo_id: str,
+    checkpoint_name: str,
+    include_metrics: bool,
+) -> str:
+    with open(template_path) as f:
+        content = f.read()
+
+    metrics_line = (
+        "Includes training metrics JSON for reproducibility."
+        if include_metrics
+        else "Training metrics JSON not included in this export."
+    )
+    return (
+        content
+        .replace("{{REPO_ID}}", repo_id)
+        .replace("{{CHECKPOINT_NAME}}", checkpoint_name)
+        .replace("{{INCLUDE_METRICS_LINE}}", metrics_line)
+    )
+
+
 def main() -> None:
     args = parse_args()
     if not args.hf_token:
@@ -145,6 +202,10 @@ def main() -> None:
     checkpoint_path = resolve_checkpoint_path(args)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    label_encoders_path = resolve_optional_path(args.label_encoders_path)
+    if label_encoders_path is None:
+        raise RuntimeError("label encoders path resolution failed")
 
     owner = args.org_name.strip()
     repo_id = f"{owner}/{args.repo_name}" if owner else args.repo_name
@@ -158,8 +219,8 @@ def main() -> None:
         exist_ok=True,
     )
 
-    label_encoders = read_label_encoders()
-    metrics_path = resolve_metrics_path(checkpoint_path)
+    label_encoders = read_label_encoders_from_path(label_encoders_path)
+    metrics_path = resolve_metrics_path(checkpoint_path, args.metrics_path)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
 
     with tempfile.TemporaryDirectory(prefix="hf-export-") as tmp:
@@ -168,9 +229,8 @@ def main() -> None:
         ckpt_target = export_dir / checkpoint_path.name
         shutil.copy2(checkpoint_path, ckpt_target)
 
-        label_path = MODELS_DIR / "label_encoders.json"
-        if label_path.exists():
-            shutil.copy2(label_path, export_dir / "label_encoders.json")
+        if label_encoders_path.exists():
+            shutil.copy2(label_encoders_path, export_dir / "label_encoders.json")
 
         if args.include_metrics and metrics_path is not None:
             shutil.copy2(metrics_path, export_dir / metrics_path.name)
@@ -179,12 +239,24 @@ def main() -> None:
         with open(export_dir / "export_config.json", "w") as f:
             json.dump(export_config, f, indent=2)
 
-        model_card = build_model_card(
-            repo_id=repo_id,
-            tags=tags,
-            checkpoint_name=checkpoint_path.name,
-            include_metrics=bool(args.include_metrics and metrics_path is not None),
-        )
+        include_metrics = bool(args.include_metrics and metrics_path is not None)
+        template_path = resolve_optional_path(args.model_card_path)
+        if template_path is not None:
+            if not template_path.exists():
+                raise FileNotFoundError(f"Model card template not found: {template_path}")
+            model_card = build_model_card_from_template(
+                template_path,
+                repo_id=repo_id,
+                checkpoint_name=checkpoint_path.name,
+                include_metrics=include_metrics,
+            )
+        else:
+            model_card = build_model_card(
+                repo_id=repo_id,
+                tags=tags,
+                checkpoint_name=checkpoint_path.name,
+                include_metrics=include_metrics,
+            )
         with open(export_dir / "README.md", "w") as f:
             f.write(model_card)
 

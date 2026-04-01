@@ -47,7 +47,7 @@ except Exception:
     wandb = None
 
 # Configuration
-BATCH_SIZE = 8
+BATCH_SIZE = 4
 HEAD_LEARNING_RATE = 1e-3  # Higher LR for new heads
 NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

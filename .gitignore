@@ -19,3 +19,4 @@ el_audios/
 models-s
 test
 kazemotts_emotion_metrics.json
+wandb/

@@ -169,6 +169,9 @@ Unfrozen encoder layers use a per-layer learning rate: **LR_n = backbone_lr_top 
 
 Use `scripts/upload_to_huggingface.py` to export checkpoints to your HF user/org model repo.
 
+Detailed guide for publishing three dataset-specific models to three repos:
+- `docs/HF_PUBLISHING_3_MODELS.md`
+
 Examples:
 ```bash
 # Stage 1 best model -> organization repo
