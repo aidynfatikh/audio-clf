@@ -35,10 +35,16 @@ from tqdm import tqdm
 import json
 import math
 import random
+from datetime import datetime
 
 # Import load_data (warnings already suppressed in load_data.py)
 from load_data import load, read_audio, DATA_DIR
 from kazemo.load_data import load_kazemotts
+
+try:
+    import wandb
+except Exception:
+    wandb = None
 
 # Configuration
 BATCH_SIZE = 8
@@ -77,6 +83,22 @@ VAL_FRACTION = 0.1
 KAZEMO_MAX_SAMPLES = int(os.environ.get("KAZEMO_MAX_SAMPLES", "20000"))
 KAZEMO_VAL_FRACTION = float(os.environ.get("KAZEMO_VAL_FRACTION", "0.1"))
 USE_KAZEMO = os.environ.get("USE_KAZEMO", "1").strip().lower() not in {"0", "false", "no"}
+
+CHECKPOINT_EVERY_STEPS = int(os.environ.get("CHECKPOINT_EVERY_STEPS", "0"))
+CHECKPOINT_KEEP_LAST_N_STEP_FILES = int(os.environ.get("CHECKPOINT_KEEP_LAST_N_STEP_FILES", "5"))
+CHECKPOINT_SAVE_LATEST_EVERY_STEPS = os.environ.get("CHECKPOINT_SAVE_LATEST_EVERY_STEPS", "0").strip().lower() in {"1", "true", "yes"}
+
+WANDB_ENABLED = os.environ.get("WANDB_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+WANDB_ENTITY = os.environ.get("WANDB_ENTITY", "")
+WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "audio-clf")
+WANDB_RUN_NAME = os.environ.get("WANDB_RUN_NAME", "")
+WANDB_RUN_GROUP = os.environ.get("WANDB_RUN_GROUP", "")
+WANDB_MODE = os.environ.get("WANDB_MODE", "")
+WANDB_TAGS = [t.strip() for t in os.environ.get("WANDB_TAGS", "").split(",") if t.strip()]
+WANDB_UPLOAD_BEST_ARTIFACT = os.environ.get("WANDB_UPLOAD_BEST_ARTIFACT", "1").strip().lower() in {"1", "true", "yes"}
+WANDB_UPLOAD_LATEST_ARTIFACT = os.environ.get("WANDB_UPLOAD_LATEST_ARTIFACT", "1").strip().lower() in {"1", "true", "yes"}
+WANDB_UPLOAD_STEP_ARTIFACT = os.environ.get("WANDB_UPLOAD_STEP_ARTIFACT", "1").strip().lower() in {"1", "true", "yes"}
+WANDB_LATEST_ARTIFACT_EVERY_STEPS = int(os.environ.get("WANDB_LATEST_ARTIFACT_EVERY_STEPS", "0"))
 
 
 def set_seed(seed: int = RANDOM_SEED) -> None:
@@ -254,6 +276,60 @@ def _sigint_handler(signum, frame):
         sys.exit(130)
     _stop_requested = True
     print("\nCtrl+C received. Finishing current batch and saving checkpoint...")
+
+
+def _save_wandb_file_artifact(run, *, file_path: Path, name: str, artifact_type: str) -> None:
+    if run is None or wandb is None:
+        return
+    if not file_path.exists():
+        return
+    art = wandb.Artifact(name=name, type=artifact_type)
+    art.add_file(str(file_path), name=file_path.name)
+    run.log_artifact(art)
+
+
+def _save_step_checkpoint(
+    *,
+    step_dir: Path,
+    global_step: int,
+    epoch: int,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LambdaLR,
+    best_val_loss: float,
+    num_emotions: int,
+    num_genders: int,
+    num_ages: int,
+    samples_seen: int,
+) -> Path:
+    step_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = step_dir / f"checkpoint_step_{global_step:08d}.pt"
+    torch.save({
+        'epoch': epoch,
+        'global_step': global_step,
+        'samples_seen': samples_seen,
+        'source': 'step',
+        'model_state_dict': _unwrap(model).state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'best_val_loss': best_val_loss,
+        'num_emotions': num_emotions,
+        'num_genders': num_genders,
+        'num_ages': num_ages,
+    }, ckpt_path)
+    return ckpt_path
+
+
+def _rotate_step_checkpoints(step_dir: Path, keep_last_n: int) -> None:
+    if keep_last_n <= 0:
+        return
+    files = sorted(step_dir.glob("checkpoint_step_*.pt"))
+    stale = files[:-keep_last_n]
+    for p in stale:
+        try:
+            p.unlink()
+        except OSError:
+            pass
 
 
 def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> torch.Tensor:
@@ -593,7 +669,8 @@ def build_label_encoders(dataset):
 
 
 def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
-                criterion_age, optimizer, device):
+                criterion_age, optimizer, device, *, step_state=None,
+                on_batch_end=None, epoch_index: int = -1):
     """Train for one epoch. Returns (metrics_dict, was_stopped)."""
     global _stop_requested
     model.train()
@@ -660,6 +737,22 @@ def train_epoch(model, dataloader, criterion_emotion, criterion_gender,
         # Clip gradients before step (guards against spikes in unfrozen layers)
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM)
         optimizer.step()
+
+        current_step = None
+        if step_state is not None:
+            step_state['global_step'] = int(step_state.get('global_step', 0)) + 1
+            step_state['samples_seen'] = int(step_state.get('samples_seen', 0)) + int(input_values.shape[0])
+            current_step = int(step_state['global_step'])
+
+        if on_batch_end is not None and current_step is not None:
+            on_batch_end({
+                'global_step': current_step,
+                'epoch': epoch_index,
+                'train_total_loss': float(total_batch_loss.item()),
+                'train_emotion_loss': float(per_task_losses['emotion'].item()) if 'emotion' in per_task_losses else None,
+                'train_gender_loss': float(per_task_losses['gender'].item()) if 'gender' in per_task_losses else None,
+                'train_age_loss': float(per_task_losses['age'].item()) if 'age' in per_task_losses else None,
+            })
 
         total_loss += total_batch_loss.item()
         emotion_loss_sum += float(per_task_losses['emotion'].item()) if 'emotion' in per_task_losses else 0.0
@@ -936,11 +1029,14 @@ def main():
     # Resume from latest checkpoint if training didn't finish
     metrics_path = MODEL_DIR / "training_metrics.json"
     latest_path = MODEL_DIR / "latest_checkpoint.pt"
+    step_ckpt_dir = MODEL_DIR / "steps"
     best_val_loss = float('inf')
     last_epoch = -1
     all_metrics = []
     start_epoch = 0
     epochs_without_improvement = 0
+    step_state = {'global_step': 0, 'samples_seen': 0}
+    wandb_run = None
 
     if latest_path.exists():
         ckpt = torch.load(latest_path, map_location=DEVICE, weights_only=False)
@@ -951,6 +1047,8 @@ def main():
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             start_epoch = ckpt["epoch"] + 1
+            step_state['global_step'] = int(ckpt.get('global_step', 0))
+            step_state['samples_seen'] = int(ckpt.get('samples_seen', 0))
             if "scheduler_state_dict" in ckpt:
                 scheduler.load_state_dict(ckpt["scheduler_state_dict"])
             else:
@@ -960,6 +1058,102 @@ def main():
                 with open(metrics_path) as f:
                     all_metrics = json.load(f)
             print(f"Resuming from epoch {start_epoch + 1}/{NUM_EPOCHS} (latest checkpoint)")
+
+    if WANDB_ENABLED:
+        if wandb is None:
+            print("WARNING: WANDB_ENABLED=1 but wandb is not installed. Skipping W&B logging.")
+        else:
+            run_name = WANDB_RUN_NAME or f"stage1-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            wandb_kwargs = {
+                'project': WANDB_PROJECT,
+                'name': run_name,
+                'config': {
+                    'batch_size': BATCH_SIZE,
+                    'num_epochs': NUM_EPOCHS,
+                    'head_learning_rate': HEAD_LEARNING_RATE,
+                    'emotion_weight': EMOTION_WEIGHT,
+                    'gender_weight': GENDER_WEIGHT,
+                    'age_weight': AGE_WEIGHT,
+                    'grad_clip_norm': GRAD_CLIP_NORM,
+                    'early_stopping_patience': EARLY_STOPPING_PATIENCE,
+                    'use_kazemo': USE_KAZEMO,
+                    'checkpoint_every_steps': CHECKPOINT_EVERY_STEPS,
+                },
+                'tags': WANDB_TAGS,
+                'resume': 'allow',
+            }
+            if WANDB_ENTITY:
+                wandb_kwargs['entity'] = WANDB_ENTITY
+            if WANDB_RUN_GROUP:
+                wandb_kwargs['group'] = WANDB_RUN_GROUP
+            if WANDB_MODE:
+                wandb_kwargs['mode'] = WANDB_MODE
+            wandb_run = wandb.init(**wandb_kwargs)
+
+    def _on_train_batch_end(payload):
+        global_step = payload['global_step']
+        if wandb_run is not None:
+            data = {
+                'train/loss_total': payload['train_total_loss'],
+                'train/epoch': payload['epoch'] + 1,
+            }
+            if payload['train_emotion_loss'] is not None:
+                data['train/loss_emotion'] = payload['train_emotion_loss']
+            if payload['train_gender_loss'] is not None:
+                data['train/loss_gender'] = payload['train_gender_loss']
+            if payload['train_age_loss'] is not None:
+                data['train/loss_age'] = payload['train_age_loss']
+            wandb_run.log(data, step=global_step)
+
+        if CHECKPOINT_EVERY_STEPS > 0 and global_step % CHECKPOINT_EVERY_STEPS == 0:
+            step_path = _save_step_checkpoint(
+                step_dir=step_ckpt_dir,
+                global_step=global_step,
+                epoch=payload['epoch'],
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                best_val_loss=best_val_loss,
+                num_emotions=num_emotions,
+                num_genders=num_genders,
+                num_ages=num_ages,
+                samples_seen=step_state['samples_seen'],
+            )
+            _rotate_step_checkpoints(step_ckpt_dir, CHECKPOINT_KEEP_LAST_N_STEP_FILES)
+            print(f"Saved step checkpoint: {step_path.name}")
+
+            if CHECKPOINT_SAVE_LATEST_EVERY_STEPS:
+                torch.save({
+                    'epoch': payload['epoch'],
+                    'global_step': global_step,
+                    'samples_seen': step_state['samples_seen'],
+                    'model_state_dict': _unwrap(model).state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'num_emotions': num_emotions,
+                    'num_genders': num_genders,
+                    'num_ages': num_ages,
+                }, latest_path)
+
+            if wandb_run is not None and WANDB_UPLOAD_STEP_ARTIFACT:
+                _save_wandb_file_artifact(
+                    wandb_run,
+                    file_path=step_path,
+                    name=f"stage1-step-{global_step:08d}",
+                    artifact_type='checkpoint',
+                )
+
+            if (wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT
+                    and WANDB_LATEST_ARTIFACT_EVERY_STEPS > 0
+                    and global_step % WANDB_LATEST_ARTIFACT_EVERY_STEPS == 0
+                    and latest_path.exists()):
+                _save_wandb_file_artifact(
+                    wandb_run,
+                    file_path=latest_path,
+                    name=f"stage1-latest-{global_step:08d}",
+                    artifact_type='checkpoint',
+                )
 
     # torch.compile with mode='default' uses TorchInductor kernel fusion.
     # Graph breaks (e.g. from HuBERT's masking ops) are handled gracefully in
@@ -980,7 +1174,10 @@ def main():
 
         train_metrics, stopped = train_epoch(
             model, train_loader, criterion_emotion, criterion_gender,
-            criterion_age, optimizer, DEVICE
+            criterion_age, optimizer, DEVICE,
+            step_state=step_state,
+            on_batch_end=_on_train_batch_end,
+            epoch_index=epoch,
         )
         last_epoch = epoch
 
@@ -996,6 +1193,17 @@ def main():
             model, val_loader, criterion_emotion, criterion_gender,
             criterion_age, DEVICE
         )
+        if wandb_run is not None:
+            wandb_run.log({
+                'val/loss_total': float(val_metrics['total']),
+                'val/loss_emotion': float(val_metrics['emotion']),
+                'val/loss_gender': float(val_metrics['gender']),
+                'val/loss_age': float(val_metrics['age']),
+                'val/acc_emotion': float(val_metrics['emotion_acc']),
+                'val/acc_gender': float(val_metrics['gender_acc']),
+                'val/acc_age': float(val_metrics['age_acc']),
+                'val/epoch': epoch + 1,
+            }, step=step_state['global_step'])
         if _stop_requested:
             break
 
@@ -1033,6 +1241,8 @@ def main():
             model_path = MODEL_DIR / "best_model.pt"
             torch.save({
                 'epoch': epoch,
+                'global_step': step_state['global_step'],
+                'samples_seen': step_state['samples_seen'],
                 'model_state_dict': _unwrap(model).state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': best_val_loss,
@@ -1041,6 +1251,13 @@ def main():
                 'num_ages': num_ages,
             }, model_path)
             print(f"Saved best model to {model_path}")
+            if wandb_run is not None and WANDB_UPLOAD_BEST_ARTIFACT:
+                _save_wandb_file_artifact(
+                    wandb_run,
+                    file_path=model_path,
+                    name=f"stage1-best-epoch-{epoch + 1}",
+                    artifact_type='model',
+                )
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
@@ -1050,10 +1267,14 @@ def main():
         # Advance LR schedule and log current LR
         scheduler.step()
         print(f"  LR: {optimizer.param_groups[0]['lr']:.2e}")
+        if wandb_run is not None:
+            wandb_run.log({'train/lr': float(optimizer.param_groups[0]['lr'])}, step=step_state['global_step'])
 
         # Save latest checkpoint (for resume; metadata: epoch = completed epoch)
         torch.save({
             'epoch': epoch,
+            'global_step': step_state['global_step'],
+            'samples_seen': step_state['samples_seen'],
             'model_state_dict': _unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
@@ -1062,11 +1283,20 @@ def main():
             'num_genders': num_genders,
             'num_ages': num_ages,
         }, latest_path)
+        if wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT and WANDB_LATEST_ARTIFACT_EVERY_STEPS <= 0:
+            _save_wandb_file_artifact(
+                wandb_run,
+                file_path=latest_path,
+                name=f"stage1-latest-epoch-{epoch + 1}",
+                artifact_type='checkpoint',
+            )
 
     if _stop_requested:
         checkpoint_path = MODEL_DIR / "checkpoint_interrupted.pt"
         torch.save({
             'epoch': last_epoch,
+            'global_step': step_state['global_step'],
+            'samples_seen': step_state['samples_seen'],
             'model_state_dict': _unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'num_emotions': num_emotions,
@@ -1077,6 +1307,8 @@ def main():
     else:
         print("\nTraining completed!")
     print(f"Best validation loss: {best_val_loss:.4f}")
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

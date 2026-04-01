@@ -29,12 +29,76 @@ python train.py
 - Trains with a frozen HuBERT backbone and three task heads.
 - Saves best model to `models/best_model.pt` and label encoders to `models/label_encoders.json`.
 
+Optional environment controls for step checkpoints and W&B logging:
+```bash
+# Save an additional checkpoint every N optimizer steps (0 = disabled)
+export CHECKPOINT_EVERY_STEPS=500
+# Keep only the latest N step checkpoint files
+export CHECKPOINT_KEEP_LAST_N_STEP_FILES=5
+
+# Enable W&B step logging and artifacts
+export WANDB_ENABLED=1
+export WANDB_ENTITY=aidynfatikh
+export WANDB_PROJECT=audio-clf
+export WANDB_RUN_NAME=stage1-hf-only
+```
+
 **Stage 2 — fine-tune top layers** (optional)
 ```bash
 python finetune.py
 ```
 - Loads stage-1 checkpoint, unfreezes the top-ranked transformer layers (see below), trains with discriminative LRs.
 - Saves to `models/finetune/`. Use `python finetune.py --analyze` to print layer importance and exit.
+
+The same step-checkpoint and W&B environment variables are supported in stage 2.
+
+Checkpoint resume keeps existing behavior:
+- Stage 1 resumes from `models/latest_checkpoint.pt` when compatible.
+- Stage 2 resumes from `models/finetune/latest_checkpoint_finetune.pt` when compatible.
+
+Both scripts now also persist `global_step` metadata in checkpoints.
+
+### Weights & Biases (W&B)
+
+The training loop logs batch-step losses and epoch validation metrics to W&B when enabled.
+
+Required setup:
+```bash
+pip install -r requirements.txt
+wandb login
+```
+
+Typical run:
+```bash
+WANDB_ENABLED=1 \
+WANDB_ENTITY=aidynfatikh \
+WANDB_PROJECT=audio-clf \
+CHECKPOINT_EVERY_STEPS=500 \
+python train.py
+```
+
+Useful W&B environment variables:
+- `WANDB_ENABLED` (`0/1`)
+- `WANDB_ENTITY`, `WANDB_PROJECT`, `WANDB_RUN_NAME`, `WANDB_RUN_GROUP`, `WANDB_TAGS`
+- `WANDB_MODE` (`online` or `offline`)
+- `WANDB_UPLOAD_BEST_ARTIFACT`, `WANDB_UPLOAD_LATEST_ARTIFACT`, `WANDB_UPLOAD_STEP_ARTIFACT`
+- `WANDB_LATEST_ARTIFACT_EVERY_STEPS` (if `>0`, latest checkpoint artifacts upload by step cadence; otherwise by epoch)
+
+### Periodic Step Checkpoints
+
+Enable periodic checkpoints without changing training compute:
+```bash
+CHECKPOINT_EVERY_STEPS=200 python train.py
+```
+
+Saved locations:
+- Stage 1 step checkpoints: `models/steps/checkpoint_step_XXXXXXXX.pt`
+- Stage 2 step checkpoints: `models/finetune/steps/checkpoint_step_XXXXXXXX.pt`
+
+Control retention:
+```bash
+CHECKPOINT_KEEP_LAST_N_STEP_FILES=10 python train.py
+```
 
 ### Generate test audio (ElevenLabs)
 
@@ -66,6 +130,10 @@ Edit constants in code as needed:
 - **train.py**: `BATCH_SIZE`, `HEAD_LEARNING_RATE`, `NUM_EPOCHS`, `EMOTION_WEIGHT`, `GENDER_WEIGHT`, `AGE_WEIGHT`.
 - **finetune.py**: `UNFREEZE_TOP_N`, `UNFREEZE_FEATURE_PROJ`, `BACKBONE_LR_TOP`, `LAYER_DECAY`, `HEAD_LR`, `NUM_EPOCHS`, `BATCH_SIZE`.
 
+Environment variables:
+- **checkpoints**: `CHECKPOINT_EVERY_STEPS`, `CHECKPOINT_KEEP_LAST_N_STEP_FILES`, `CHECKPOINT_SAVE_LATEST_EVERY_STEPS`
+- **wandb**: variables listed above
+
 ## Model Architecture
 
 - **Backbone**: HuBERT-base (`facebook/hubert-base-ls960`), 16 kHz input.
@@ -93,4 +161,38 @@ Unfrozen encoder layers use a per-layer learning rate: **LR_n = backbone_lr_top 
 - Automatic 16 kHz resampling and 10 s fixed-length segments.
 - Multi-task loss with configurable task weights.
 - Checkpoint resume (stage 1 and stage 2); Ctrl+C saves and allows clean stop.
+- Optional periodic checkpoint saves by optimizer step.
+- Optional W&B integration with global batch-step logging and artifact uploads.
 - Validation metrics and best-model saving.
+
+## Export To Hugging Face Hub
+
+Use `scripts/upload_to_huggingface.py` to export checkpoints to your HF user/org model repo.
+
+Examples:
+```bash
+# Stage 1 best model -> organization repo
+python scripts/upload_to_huggingface.py \
+   --repo-name kazakh-audio-clf \
+   --org-name aidynfatikh \
+   --checkpoint best \
+   --include-metrics
+
+# Stage 2 latest finetuned checkpoint -> user repo
+python scripts/upload_to_huggingface.py \
+   --repo-name kazakh-audio-clf-finetuned \
+   --checkpoint latest-finetuned \
+   --include-metrics
+```
+
+Required auth:
+```bash
+export HF_TOKEN=your_hf_token
+```
+
+Upload package includes:
+- Selected checkpoint `.pt`
+- `label_encoders.json` (if present)
+- `export_config.json` (generated metadata)
+- `README.md` model card (generated)
+- metrics JSON (optional)

@@ -9,3 +9,4 @@ tqdm>=4.65.0
 numpy>=1.24.0
 gradio>=4.0.0
 elevenlabs>=1.0.0
+wandb>=0.17.0
