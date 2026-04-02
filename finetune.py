@@ -6,6 +6,9 @@ Stage 2 training: loads a checkpoint from frozen-backbone training (train.py),
 then unfreezes the top-N HuBERT transformer layers (ranked by learned per-task
 layer weights), and continues training with a low backbone LR.
 
+Data loading uses train.build_mixed_train_val_splits(): set TRAIN_VAL_MANIFEST and
+HF_BATCH01_*/HF_BATCH02_* the same as for train.py (val = validate.py holdout only).
+
 Usage:
   python finetune.py              # Fine-tune with defaults (top 4 layers)
   python finetune.py --analyze    # Print layer importance and exit
@@ -47,6 +50,8 @@ from train import (
     _make_cosine_schedule,
     set_seed,
     RANDOM_SEED,
+    USE_KAZEMO,
+    KAZEMO_MAX_SAMPLES,
 )
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -623,7 +628,7 @@ def main() -> None:
                 _save_wandb_file_artifact(
                     wandb_run,
                     file_path=step_path,
-                    name=f"stage2-step-{global_step:08d}",
+                    name="stage2-step",
                     artifact_type='checkpoint',
                 )
 
@@ -634,7 +639,7 @@ def main() -> None:
                 _save_wandb_file_artifact(
                     wandb_run,
                     file_path=latest_ft_path,
-                    name=f"stage2-latest-{global_step:08d}",
+                    name="stage2-latest",
                     artifact_type='checkpoint',
                 )
 
@@ -651,8 +656,18 @@ def main() -> None:
     processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
 
     print("Dataset composition:")
+    if composition.get("mode") == "holdout_manifest":
+        print("  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
+        print(f"  Manifest: {composition['manifest']}")
+        print(
+            f"  batch01 train-only / val holdout: {composition['batch01_train_only']} / {composition['hf_val']}"
+        )
+        print(f"  batch02 train-only (full split): {composition['batch02_train_only']}")
     print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
-    print(f"  Kazemo train/val: {composition['kazemo_train']} / {composition['kazemo_val']}")
+    print(
+        f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
+        f"{composition['kazemo_train']} / {composition['kazemo_val']}"
+    )
     if composition.get("kazemo_emotion_counts"):
         emo_counts = ", ".join([f"{k}:{v}" for k, v in composition["kazemo_emotion_counts"].items()])
         print(f"  Kazemo selected emotion counts: {emo_counts}")
@@ -782,7 +797,7 @@ def main() -> None:
                 _save_wandb_file_artifact(
                     wandb_run,
                     file_path=best_model_path,
-                    name=f"stage2-best-epoch-{epoch + 1}",
+                    name="stage2-best",
                     artifact_type='model',
                 )
         else:
@@ -820,7 +835,7 @@ def main() -> None:
             _save_wandb_file_artifact(
                 wandb_run,
                 file_path=latest_ft_path,
-                name=f"stage2-latest-epoch-{epoch + 1}",
+                name="stage2-latest",
                 artifact_type='checkpoint',
             )
 

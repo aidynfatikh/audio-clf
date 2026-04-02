@@ -28,7 +28,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from transformers import HubertModel, Wav2Vec2FeatureExtractor
-from datasets import Audio, DatasetDict, Features, Value, concatenate_datasets
+from datasets import Audio, DatasetDict, Features, Value, concatenate_datasets, load_dataset
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -38,8 +38,18 @@ import random
 from datetime import datetime
 
 # Import load_data (warnings already suppressed in load_data.py)
+from dotenv import load_dotenv
+from huggingface_hub import login as hf_login
+
 from load_data import load, read_audio, DATA_DIR
 from kazemo.load_data import load_kazemotts
+from validation_holdout import (
+    first_index_by_row_id,
+    holdout_source_id_set,
+    load_validation_sample_ids,
+    train_indices_excluding_holdout,
+    val_indices_from_manifest,
+)
 
 try:
     import wandb
@@ -83,6 +93,20 @@ VAL_FRACTION = 0.1
 KAZEMO_MAX_SAMPLES = int(os.environ.get("KAZEMO_MAX_SAMPLES", "20000"))
 KAZEMO_VAL_FRACTION = float(os.environ.get("KAZEMO_VAL_FRACTION", "0.1"))
 USE_KAZEMO = os.environ.get("USE_KAZEMO", "1").strip().lower() not in {"0", "false", "no"}
+
+# Mixed batch01 + batch02 with frozen val = validate.py manifest (1008). Val is only from batch01;
+# train = (batch01 \\ holdout ids) ∪ batch02 [∪ Kazemo train if USE_KAZEMO]. Set TRAIN_VAL_MANIFEST to enable.
+TRAIN_VAL_MANIFEST = os.environ.get("TRAIN_VAL_MANIFEST", "").strip()
+HF_BATCH01_ID = os.environ.get("HF_BATCH01_ID", "01gumano1d/batch01-validation-test")
+HF_BATCH02_ID = os.environ.get("HF_BATCH02_ID", "01gumano1d/batch2-aug-clean")
+HF_BATCH01_SPLIT = os.environ.get("HF_BATCH01_SPLIT", "train")
+_REPO_ROOT = Path(__file__).resolve().parent
+HF_BATCH01_CACHE = Path(
+    os.environ.get("HF_BATCH01_CACHE", str(_REPO_ROOT / "data" / "batch01-validation-test"))
+)
+HF_BATCH02_CACHE = Path(
+    os.environ.get("HF_BATCH02_CACHE", str(_REPO_ROOT / "data" / "batch2-aug-clean"))
+)
 
 CHECKPOINT_EVERY_STEPS = int(os.environ.get("CHECKPOINT_EVERY_STEPS", "0"))
 CHECKPOINT_KEEP_LAST_N_STEP_FILES = int(os.environ.get("CHECKPOINT_KEEP_LAST_N_STEP_FILES", "5"))
@@ -204,8 +228,95 @@ def _count_emotion_distribution(split):
     return dict(sorted(counts.items(), key=lambda kv: kv[0]))
 
 
+def build_holdout_mixed_train_val_splits(manifest_path: Path):
+    """batch01: train = all rows whose clip id is not in manifest; val = exact 1008 from manifest.
+    batch02: entire split → train only. No batch02 in val. Optionally append Kazemo train (never Kazemo val)."""
+    load_dotenv(_REPO_ROOT / ".env")
+    tok = os.environ.get("HF_TOKEN")
+    if tok:
+        hf_login(token=tok)
+
+    manifest_path = manifest_path.resolve()
+    sample_ids = load_validation_sample_ids(manifest_path)
+    holdout_bases = holdout_source_id_set(sample_ids)
+
+    print(f"[data] Holdout manifest: {manifest_path} ({len(sample_ids)} validation rows)")
+    HF_BATCH01_CACHE.mkdir(parents=True, exist_ok=True)
+    print(f"[data] batch01: {HF_BATCH01_ID!r} cache={HF_BATCH01_CACHE} split={HF_BATCH01_SPLIT!r}")
+    ds1 = load_dataset(HF_BATCH01_ID, cache_dir=str(HF_BATCH01_CACHE))
+    split1 = ds1[HF_BATCH01_SPLIT] if HF_BATCH01_SPLIT in ds1 else ds1[list(ds1.keys())[0]]
+    split1 = _force_canonical_label_schema(_prepare_split_for_training(split1))
+
+    id_to_idx = first_index_by_row_id(split1)
+    val_indices = val_indices_from_manifest(sample_ids, id_to_idx)
+    val_split = split1.select(val_indices)
+    if len(val_split) != len(sample_ids):
+        raise RuntimeError(f"Val size {len(val_split)} != manifest {len(sample_ids)}")
+
+    train_idx = train_indices_excluding_holdout(split1, holdout_bases)
+    train_b1 = split1.select(train_idx)
+
+    HF_BATCH02_CACHE.mkdir(parents=True, exist_ok=True)
+    print(f"[data] batch02 → train only: {HF_BATCH02_ID!r} cache={HF_BATCH02_CACHE}")
+    ds2 = load_dataset(HF_BATCH02_ID, cache_dir=str(HF_BATCH02_CACHE))
+    b2 = ds2.get("train")
+    if b2 is None:
+        b2 = ds2[list(ds2.keys())[0]]
+    b2 = _force_canonical_label_schema(_prepare_split_for_training(b2), reference_split=train_b1)
+
+    kazemo_train_count = 0
+    kazemo_val_count = 0
+    kazemo_emotion_counts: dict = {}
+
+    train_split = concatenate_datasets([train_b1, b2])
+
+    if USE_KAZEMO:
+        print(f"[data] USE_KAZEMO=1: appending Kazemo train only (not val); cap={KAZEMO_MAX_SAMPLES}")
+        kz_ds: DatasetDict = load_kazemotts(cache_dir=str(DATA_DIR), max_samples=KAZEMO_MAX_SAMPLES)
+        kz_base = kz_ds.get("train", kz_ds[list(kz_ds.keys())[0]])
+        kz_base = _prepare_split_for_training(kz_base)
+        kz_split = kz_base.train_test_split(
+            test_size=KAZEMO_VAL_FRACTION,
+            seed=RANDOM_SEED,
+            shuffle=True,
+        )
+        kz_train = _force_canonical_label_schema(
+            _prepare_split_for_training(kz_split["train"]), reference_split=train_b1
+        )
+        kazemo_train_count = len(kz_train)
+        kazemo_emotion_counts = _count_emotion_distribution(kz_base)
+        train_split = concatenate_datasets([train_split, kz_train])
+
+    composition = {
+        "mode": "holdout_manifest",
+        "manifest": str(manifest_path),
+        "batch01_id": HF_BATCH01_ID,
+        "batch02_id": HF_BATCH02_ID,
+        "batch01_split": HF_BATCH01_SPLIT,
+        "batch01_train_only": len(train_b1),
+        "batch02_train_only": len(b2),
+        "hf_train": len(train_b1),
+        "hf_val": len(val_split),
+        "kazemo_train": kazemo_train_count,
+        "kazemo_val": kazemo_val_count,
+        "kazemo_emotion_counts": kazemo_emotion_counts,
+        "train_total": len(train_split),
+        "val_total": len(val_split),
+        "train_label_counts": _count_label_presence(train_split),
+        "val_label_counts": _count_label_presence(val_split),
+    }
+    merged_hf = DatasetDict({"batch01_train": train_b1, "batch01_val_holdout": val_split, "batch02_train": b2})
+    return merged_hf, train_split, val_split, composition
+
+
 def build_mixed_train_val_splits():
     """Build train/val splits using full HF data and optional capped Kazemo data."""
+    if TRAIN_VAL_MANIFEST:
+        mp = Path(TRAIN_VAL_MANIFEST)
+        if not mp.is_absolute():
+            mp = _REPO_ROOT / mp
+        return build_holdout_mixed_train_val_splits(mp)
+
     hf_dataset = load()
     hf_train = hf_dataset.get("train")
     if hf_train is None:
@@ -929,6 +1040,13 @@ def main():
     processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
     
     print("Dataset composition:")
+    if composition.get("mode") == "holdout_manifest":
+        print(f"  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
+        print(f"  Manifest: {composition['manifest']}")
+        print(
+            f"  batch01 train-only / val holdout: {composition['batch01_train_only']} / {composition['hf_val']}"
+        )
+        print(f"  batch02 train-only (full split): {composition['batch02_train_only']}")
     print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
     print(f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
           f"{composition['kazemo_train']} / {composition['kazemo_val']}")
@@ -1137,10 +1255,11 @@ def main():
                 }, latest_path)
 
             if wandb_run is not None and WANDB_UPLOAD_STEP_ARTIFACT:
+                # Stable name: overwrite same artifact family (step file on disk still rotated).
                 _save_wandb_file_artifact(
                     wandb_run,
                     file_path=step_path,
-                    name=f"stage1-step-{global_step:08d}",
+                    name="stage1-step",
                     artifact_type='checkpoint',
                 )
 
@@ -1151,7 +1270,7 @@ def main():
                 _save_wandb_file_artifact(
                     wandb_run,
                     file_path=latest_path,
-                    name=f"stage1-latest-{global_step:08d}",
+                    name="stage1-latest",
                     artifact_type='checkpoint',
                 )
 
@@ -1255,7 +1374,7 @@ def main():
                 _save_wandb_file_artifact(
                     wandb_run,
                     file_path=model_path,
-                    name=f"stage1-best-epoch-{epoch + 1}",
+                    name="stage1-best",
                     artifact_type='model',
                 )
         else:
@@ -1287,7 +1406,7 @@ def main():
             _save_wandb_file_artifact(
                 wandb_run,
                 file_path=latest_path,
-                name=f"stage1-latest-epoch-{epoch + 1}",
+                name="stage1-latest",
                 artifact_type='checkpoint',
             )
 

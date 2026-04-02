@@ -20,3 +20,6 @@ models-s
 test
 kazemotts_emotion_metrics.json
 wandb/
+models-baseline
+eval-baseline
+eval
