@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Evaluate MultiTaskHubert checkpoints and visualise training history.
 
-Outputs written to eval/:
+Outputs written to ``results/`` (repo root):
   training_curves.png      — loss + accuracy from stage-1 → finetune
   layer_weights.png        — learned HuBERT layer-attention weights over epochs
   eval_results.json        — per-checkpoint accuracy + per-class breakdown
@@ -12,7 +12,7 @@ Checkpoints evaluated (prefers finetune files, falls back to stage-1):
   2. latest_checkpoint_finetune.pt / latest_checkpoint.pt
 
 Usage:
-    python evaluate.py [--split val|test|both] [--batch-size N] [--device cpu|cuda]
+    python eval/evaluate.py [--split val|test|both] [--batch-size N] [--device cpu|cuda]
 """
 
 import os
@@ -22,6 +22,10 @@ import argparse
 import warnings
 from collections import defaultdict
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 os.environ["TORCHCODEC_QUIET"] = "1"
@@ -38,12 +42,13 @@ from torch.utils.data import DataLoader
 from datasets import Audio
 from tqdm import tqdm
 
-from load_data import load
-from train import AudioDataset, MODEL_DIR, SAMPLE_RATE
-from inference import load_model
+from loaders.load_data import load
+from multihead.utils import AudioDataset, MODEL_DIR, SAMPLE_RATE
+from eval.inference import load_model
+from eval.results_dir import RESULTS_DIR
 
 FINETUNE_DIR = Path(MODEL_DIR) / "finetune"
-EVAL_DIR     = Path(__file__).resolve().parent / "eval"
+EVAL_DIR = RESULTS_DIR
 S1_METRICS   = Path(MODEL_DIR) / "training_metrics.json"
 FT_METRICS   = FINETUNE_DIR   / "training_metrics_finetune.json"
 
@@ -325,7 +330,7 @@ def _candidate_checkpoints() -> list[tuple[str, Path]]:
         ]
     result = [(lbl, p) for lbl, p in pairs if p.exists()]
     if not result:
-        sys.exit("No checkpoints found. Run train.py (and optionally finetune.py) first.")
+        sys.exit("No checkpoints found. Run multihead/train.py (and optionally multihead/finetune.py) first.")
     return result
 
 
@@ -483,8 +488,8 @@ def main():
     # user can see explicitly that val/test were never fed into the optimiser.
     train_key = next((k for k in dataset.keys() if k == "train"), None)
     print("\nData-split audit:")
-    print(f"  Training split used by train.py  : {train_key or '(first split)'}")
-    print(f"  Validation split used by train.py: validation → val → test (first match)")
+    print(f"  Training split used by multihead/train.py  : {train_key or '(first split)'}")
+    print(f"  Validation split used by multihead/train.py: validation → val → test (first match)")
     print(f"  Splits being evaluated now       : {list(splits_to_eval.keys())}")
     print()
 
@@ -529,6 +534,7 @@ def main():
     print_comparison(evaluated)
 
     # ── Save JSON ──────────────────────────────────────────────────────────────
+    EVAL_DIR.mkdir(parents=True, exist_ok=True)
     json_path = EVAL_DIR / "eval_results.json"
     json_out  = {}
     for label, split_name, ckpt_path, res in evaluated:

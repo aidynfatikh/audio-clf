@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import random
-from typing import Iterable
-
 import numpy as np
 
 
@@ -86,4 +84,3 @@ class NoiseMixer:
         if noise.ndim > 1:
             noise = noise.mean(axis=1).astype(np.float32, copy=False)
         return _crop_or_tile(noise, length)
-

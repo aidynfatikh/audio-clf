@@ -11,8 +11,8 @@ from pathlib import Path
 os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 os.environ["TORCHCODEC_QUIET"] = "1"
 
-# Allow running via `python kazemo/evaluate.py` (not only `python -m kazemo.evaluate`).
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# Allow running as `python eval/kazemo_evaluate.py` from repo root.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -21,11 +21,12 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from inference import load_model, resolve_checkpoint
-from load_data import read_audio
-from train import MODEL_DIR, SAMPLE_RATE
+from eval.inference import load_model, resolve_checkpoint
+from eval.results_dir import RESULTS_DIR
+from loaders.load_data import read_audio
+from multihead.utils import MODEL_DIR, SAMPLE_RATE
 
-from kazemo.load_data import load_kazemotts
+from loaders.kazemo.load_data import load_kazemotts
 
 
 class KazEmoEmotionDataset(Dataset):
@@ -136,8 +137,8 @@ def main():
     parser.add_argument("--checkpoint", default=None, help="Path to checkpoint .pt (default: auto)")
     parser.add_argument(
         "--out",
-        default=str(Path(__file__).resolve().parent / "kazemotts_emotion_metrics.json"),
-        help="Where to write metrics JSON.",
+        default=str(RESULTS_DIR / "kazemotts_emotion_metrics.json"),
+        help="Where to write metrics JSON (default: results/kazemotts_emotion_metrics.json).",
     )
     parser.add_argument("--cache-dir", default=None, help="Hugging Face datasets cache dir.")
     args = parser.parse_args()

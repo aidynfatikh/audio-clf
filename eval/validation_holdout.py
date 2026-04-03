@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def base_row_id(sid: str) -> str:
     """Dataset clip id as in HF row['id'] (strip synthetic repad suffix from validate.py)."""
@@ -26,21 +28,25 @@ def load_validation_sample_ids(manifest_path: Path | str) -> list[str]:
     ids = data.get("validation_sample_ids")
     if isinstance(ids, list) and ids:
         return [str(x) for x in ids]
-    # Older manifests: same order as validate.py eval report
-    alt = path.parent / "validation_eval_results.json"
-    if alt.exists():
-        with open(alt) as f:
-            ev = json.load(f)
-        samples = ev.get("samples") or []
-        out = [str(s.get("sample_id", "")) for s in samples if s.get("sample_id")]
-        n = int(ev.get("total_samples") or 0)
-        if n and len(out) == n:
-            return out
-        if not n and out:
-            return out
+    # Older manifests: same order as validate.py eval report (sibling or repo results/)
+    alt_candidates = [
+        path.parent / "validation_eval_results.json",
+        _REPO_ROOT / "results" / "validation_eval_results.json",
+    ]
+    for alt in alt_candidates:
+        if alt.exists():
+            with open(alt) as f:
+                ev = json.load(f)
+            samples = ev.get("samples") or []
+            out = [str(s.get("sample_id", "")) for s in samples if s.get("sample_id")]
+            n = int(ev.get("total_samples") or 0)
+            if n and len(out) == n:
+                return out
+            if not n and out:
+                return out
     raise ValueError(
         f"{path} has no validation_sample_ids; run validate.py again, "
-        f"or keep sibling {alt.name} with samples[].sample_id (same order as eval)."
+        "or keep results/validation_eval_results.json with samples[].sample_id (same order as eval)."
     )
 
 

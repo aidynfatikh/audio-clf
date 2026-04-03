@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-# Run from repo root so train/inference are importable
+# Run from repo root so multihead/eval are importable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -22,8 +22,8 @@ import soundfile as sf
 import torch
 import torch.nn.functional as F
 
-from inference import load_model, resolve_checkpoint, DEVICE
-from train import MODEL_DIR, SAMPLE_RATE
+from eval.inference import load_model, resolve_checkpoint, DEVICE
+from multihead.utils import MODEL_DIR, SAMPLE_RATE
 
 MAX_LENGTH = 160000  # 10 s at 16 kHz
 

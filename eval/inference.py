@@ -15,8 +15,9 @@ from torch.utils.data import DataLoader
 from transformers import Wav2Vec2FeatureExtractor
 from datasets import Audio
 
-from load_data import load, read_audio
-from train import MultiTaskHubert, AudioDataset, MODEL_DIR, SAMPLE_RATE
+from loaders.load_data import load, read_audio
+from multihead.model import MultiTaskHubert
+from multihead.utils import AudioDataset, MODEL_DIR, SAMPLE_RATE
 
 BATCH_SIZE = 8
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,14 +28,14 @@ def resolve_checkpoint() -> Path:
 
     Priority: finetuned model → stage-1 best model.
     """
-    finetune = Path(MODEL_DIR).parent / "models" / "finetune" / "best_model_finetuned.pt"
-    stage1   = Path(MODEL_DIR) / "best_model.pt"
+    finetune = Path(MODEL_DIR) / "finetune" / "best_model_finetuned.pt"
+    stage1 = Path(MODEL_DIR) / "best_model.pt"
     if finetune.exists():
         return finetune
     if stage1.exists():
         return stage1
     raise FileNotFoundError(
-        "No checkpoint found. Run train.py (and optionally finetune.py) first."
+        "No checkpoint found. Run multihead/train.py (and optionally multihead/finetune.py) first."
     )
 
 

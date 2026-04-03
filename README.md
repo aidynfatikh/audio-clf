@@ -23,7 +23,7 @@ HF_TOKEN=your_token_here
 
 **Stage 1 — frozen backbone**
 ```bash
-python train.py
+python multihead/train.py
 ```
 - Loads dataset from `01gumano1d/batch01-aug`, infers emotion/gender/age classes.
 - Trains with a frozen HuBERT backbone and three task heads.
@@ -45,10 +45,10 @@ export WANDB_RUN_NAME=stage1-hf-only
 
 **Stage 2 — fine-tune top layers** (optional)
 ```bash
-python finetune.py
+python multihead/finetune.py
 ```
 - Loads stage-1 checkpoint, unfreezes the top-ranked transformer layers (see below), trains with discriminative LRs.
-- Saves to `models/finetune/`. Use `python finetune.py --analyze` to print layer importance and exit.
+- Saves to `models/finetune/`. Use `python multihead/finetune.py --analyze` to print layer importance and exit.
 
 The same step-checkpoint and W&B environment variables are supported in stage 2.
 
@@ -74,7 +74,7 @@ WANDB_ENABLED=1 \
 WANDB_ENTITY=aidynfatikh \
 WANDB_PROJECT=audio-clf \
 CHECKPOINT_EVERY_STEPS=500 \
-python train.py
+python multihead/train.py
 ```
 
 Useful W&B environment variables:
@@ -88,7 +88,7 @@ Useful W&B environment variables:
 
 Enable periodic checkpoints without changing training compute:
 ```bash
-CHECKPOINT_EVERY_STEPS=200 python train.py
+CHECKPOINT_EVERY_STEPS=200 python multihead/train.py
 ```
 
 Saved locations:
@@ -97,7 +97,7 @@ Saved locations:
 
 Control retention:
 ```bash
-CHECKPOINT_KEEP_LAST_N_STEP_FILES=10 python train.py
+CHECKPOINT_KEEP_LAST_N_STEP_FILES=10 python multihead/train.py
 ```
 
 ### Generate test audio (ElevenLabs)
@@ -127,8 +127,8 @@ Generate 16 kHz WAVs from a text file for testing the classifier. Uses ElevenLab
 ### Configuration
 
 Edit constants in code as needed:
-- **train.py**: `BATCH_SIZE`, `HEAD_LEARNING_RATE`, `NUM_EPOCHS`, `EMOTION_WEIGHT`, `GENDER_WEIGHT`, `AGE_WEIGHT`.
-- **finetune.py**: `UNFREEZE_TOP_N`, `UNFREEZE_FEATURE_PROJ`, `BACKBONE_LR_TOP`, `LAYER_DECAY`, `HEAD_LR`, `NUM_EPOCHS`, `BATCH_SIZE`.
+- **multihead/train.py**: `BATCH_SIZE`, `HEAD_LEARNING_RATE`, `NUM_EPOCHS`, `EMOTION_WEIGHT`, `GENDER_WEIGHT`, `AGE_WEIGHT`.
+- **multihead/finetune.py**: `UNFREEZE_TOP_N`, `UNFREEZE_FEATURE_PROJ`, `BACKBONE_LR_TOP`, `LAYER_DECAY`, `HEAD_LR`, `NUM_EPOCHS`, `BATCH_SIZE`.
 
 Environment variables:
 - **checkpoints**: `CHECKPOINT_EVERY_STEPS`, `CHECKPOINT_KEEP_LAST_N_STEP_FILES`, `CHECKPOINT_SAVE_LATEST_EVERY_STEPS`

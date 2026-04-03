@@ -15,10 +15,13 @@ Pipeline:
 6) Save JSON reports for subset composition and evaluation metrics.
 
 Usage:
-  python validate.py
-  python validate.py --model-path models/finetune/best_model_finetuned.pt
-  python validate.py --samples-per-stratum 18 --batch-size 8
-  python validate.py --fill-seed 123
+  python eval/validate.py
+  python eval/validate.py --model-path models/finetune/best_model_finetuned.pt
+  python eval/validate.py --samples-per-stratum 18 --batch-size 8
+  python eval/validate.py --fill-seed 123
+
+Reports default to ``results/validation_eval_results.json`` and
+``results/validation_subset_manifest.json`` under the repo root.
 """
 
 from __future__ import annotations
@@ -36,6 +39,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 os.environ["TORCHCODEC_QUIET"] = "1"
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -50,9 +57,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import Wav2Vec2FeatureExtractor
 
-from inference import load_model, resolve_checkpoint
-from load_data import read_audio
-from train import SAMPLE_RATE
+from eval.inference import load_model, resolve_checkpoint
+from loaders.load_data import read_audio
+from multihead.utils import SAMPLE_RATE
 
 
 DEFAULT_DATASET_ID = "01gumano1d/batch01-validation-test"
@@ -628,18 +635,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", choices=["cpu", "cuda"], default=None)
     parser.add_argument("--model-path", type=Path, default=None)
-    parser.add_argument("--cache-dir", type=Path, default=Path(__file__).resolve().parent / "data" / "batch01-validation-test")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=_REPO_ROOT / "data" / "batch01-validation-test",
+    )
     parser.add_argument("--fill-seed", type=int, default=42, help="RNG seed for random top-up sampling (default: 42)")
-    parser.add_argument("--out-json", type=Path, default=Path(__file__).resolve().parent / "eval" / "validation_eval_results.json")
-    parser.add_argument("--subset-json", type=Path, default=Path(__file__).resolve().parent / "eval" / "validation_subset_manifest.json")
+    parser.add_argument(
+        "--out-json",
+        type=Path,
+        default=_REPO_ROOT / "results" / "validation_eval_results.json",
+    )
+    parser.add_argument(
+        "--subset-json",
+        type=Path,
+        default=_REPO_ROOT / "results" / "validation_subset_manifest.json",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    repo_root = Path(__file__).resolve().parent
-    load_dotenv(repo_root / ".env")
+    load_dotenv(_REPO_ROOT / ".env")
     hf_token = os.environ.get("HF_TOKEN")
     if hf_token:
         login(token=hf_token)
@@ -716,6 +734,7 @@ def main() -> None:
                 "missing_audio_rows": build_stats.missing_audio_rows,
             },
         }
+        args.subset_json.parent.mkdir(parents=True, exist_ok=True)
         with open(args.subset_json, "w") as f:
             json.dump(fail_report, f, indent=2)
         print("[build] Wrote failure inventory to", args.subset_json, flush=True)

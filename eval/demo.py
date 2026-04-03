@@ -11,7 +11,7 @@ import sys
 import argparse
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -24,7 +24,8 @@ import torch
 import torch.nn.functional as F
 from transformers import Wav2Vec2FeatureExtractor
 
-from train import MultiTaskHubert, MODEL_DIR, SAMPLE_RATE
+from multihead.model import MultiTaskHubert
+from multihead.utils import MODEL_DIR, SAMPLE_RATE
 
 # Single-head (emotion) paths
 SINGLE_HEAD_FEATURE = "emotion"

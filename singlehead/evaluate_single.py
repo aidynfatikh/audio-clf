@@ -3,16 +3,16 @@
 
 Runs only on finetuned best and latest (no stage-1 checkpoints).
 
-Outputs written to single_head/eval/:
+Outputs written to ``results/`` (repo root):
   training_curves_{feature}.png   — loss + accuracy (stage-1 → finetune)
   layer_weights_{feature}.png    — learned layer attention
   eval_results_{feature}.json     — per-checkpoint accuracy + per-class breakdown
   accuracy_bars_{feature}.png    — per-class accuracy
 
 Usage:
-  python single_head/evaluate_single.py --feature emotion
-  python single_head/evaluate_single.py --feature age --split test
-  python single_head/evaluate_single.py --feature emotion --train   # also run on train split
+  python singlehead/evaluate_single.py --feature emotion
+  python singlehead/evaluate_single.py --feature age --split test
+  python singlehead/evaluate_single.py --feature emotion --train   # also run on train split
 """
 
 import argparse
@@ -42,12 +42,12 @@ from torch.utils.data import DataLoader
 from datasets import Audio
 from tqdm import tqdm
 
-from load_data import load
+from loaders.load_data import load
 from train_single import AudioDataset, build_label_encoders, FEATURES
 from inference_single import load_model
 
 MODEL_BASE = Path(__file__).resolve().parent / "models"
-EVAL_DIR = Path(__file__).resolve().parent / "eval"
+EVAL_DIR = _REPO_ROOT / "results"
 
 
 def _load_json(path: Path) -> list:

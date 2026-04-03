@@ -37,7 +37,7 @@ from transformers import Wav2Vec2FeatureExtractor
 from datasets import Audio
 import json
 
-from load_data import load
+from loaders.load_data import load
 from train_single import (
     SingleHeadHubert,
     AudioDataset,

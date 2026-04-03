@@ -40,8 +40,8 @@ from tqdm import tqdm
 import json
 import math
 import random
-from audio_augment import speed_perturb, mix_at_snr
-from load_data import load, read_audio
+from utils.audio_augment import speed_perturb, mix_at_snr
+from loaders.load_data import load, read_audio
 
 # Feature choices: one head per run
 FEATURES = ("emotion", "age", "gender")
@@ -180,6 +180,7 @@ class SingleHeadHubert(nn.Module):
 
     def forward(self, input_values, attention_mask=None):
         outputs = self.hubert(input_values, attention_mask=attention_mask)
+        # True only if every HuBERT weight is frozen; partial finetune → False → grad through stack.
         backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
         if backbone_frozen:
             with torch.no_grad():
@@ -208,7 +209,7 @@ class AudioDataset(torch.utils.data.Dataset):
         self.snr_db_range = (5.0, 20.0)
         self._noise_mixer = None
         if noise_dir:
-            from audio_augment import NoiseMixer
+            from utils.audio_augment import NoiseMixer
 
             self._noise_mixer = NoiseMixer.from_dir(noise_dir)
 

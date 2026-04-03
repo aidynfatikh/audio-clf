@@ -6,9 +6,9 @@ Expects:
     - eval/eval_results.json  or  eval_results.json
     - models/training_metrics.json  (optional, for curves)
     - models/finetune/training_metrics_finetune.json  (optional)
-  - eval/eval_results.json  (current/latest run)
+  - results/eval_results.json  (current/latest run; legacy: eval/eval_results.json)
 
-Outputs (in eval/run_comparison/):
+Outputs (in results/run_comparison/):
   - test_accuracy_bars.png   — test acc by run and task (grouped bars)
   - val_vs_test.png         — val vs test acc per run/task (gap view)
   - training_curves.png     — val loss & val acc over epochs, all runs overlaid
@@ -27,8 +27,8 @@ import matplotlib.pyplot as plt
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_NAMES = ["01_hold_lr_run", "02_warmup_lr_run", "03_regularized_run"]
-EVAL_DIR = REPO_ROOT / "eval"
-OUT_DIR = EVAL_DIR / "run_comparison"
+RESULTS_DIR = REPO_ROOT / "results"
+OUT_DIR = RESULTS_DIR / "run_comparison"
 TASKS = ("emotion", "gender", "age")
 SPLITS = ("validation", "test")
 CHECKPOINT_KEY = "Finetuned best"  # primary checkpoint to compare across runs
@@ -56,8 +56,10 @@ def discover_run_evals() -> dict[str, dict]:
             if data is not None and isinstance(data, dict):
                 out[name] = data
                 break
-    # Latest run: current eval/
-    latest = _load_json(EVAL_DIR / "eval_results.json")
+    # Latest run: results/ (legacy: eval/eval_results.json)
+    latest = _load_json(RESULTS_DIR / "eval_results.json")
+    if latest is None:
+        latest = _load_json(REPO_ROOT / "eval" / "eval_results.json")
     if latest is not None and isinstance(latest, dict):
         out["eval"] = latest
     return out
@@ -258,7 +260,7 @@ def main() -> None:
 
     run_evals = discover_run_evals()
     if not run_evals:
-        print("No eval_results.json found in any run dir or eval/. Exiting.")
+        print("No eval_results.json found in any run dir or results/. Exiting.")
         return
     print("Runs with eval JSONs:", list(run_evals.keys()))
 

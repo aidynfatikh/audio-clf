@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from transformers import Wav2Vec2FeatureExtractor
 from datasets import Audio
 
-from load_data import load, read_audio
+from loaders.load_data import load, read_audio
 from train_single import SingleHeadHubert, AudioDataset, build_label_encoders, FEATURES
 
 BATCH_SIZE = 8
