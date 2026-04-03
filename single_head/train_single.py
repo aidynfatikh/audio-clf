@@ -182,9 +182,8 @@ class SingleHeadHubert(nn.Module):
         outputs = self.hubert(input_values, attention_mask=attention_mask)
         backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
         if backbone_frozen:
-            all_layers = torch.stack(
-                [h.detach().clone() for h in outputs.hidden_states]
-            )
+            with torch.no_grad():
+                all_layers = torch.stack(outputs.hidden_states, dim=0)
         else:
             all_layers = torch.stack(outputs.hidden_states, dim=0)
         feats = _weighted_pool(all_layers, self.layer_weights)

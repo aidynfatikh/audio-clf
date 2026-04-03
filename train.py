@@ -600,14 +600,15 @@ class MultiTaskHubert(nn.Module):
         outputs = self.hubert(input_values, attention_mask=attention_mask)
 
         # hidden_states: tuple of 13 tensors [batch, time, hidden].
-        # When backbone is fully frozen: .detach().clone() saves memory and breaks
-        # HuggingFace storage aliasing so dynamo sees 13 independent tensors.
-        # When any layer is unfrozen (finetune): do not detach so gradients flow.
+        # Frozen backbone: stack once under no_grad. Per-layer .detach().clone() before
+        # stack duplicated every layer (~2× activation memory for this block); finetune
+        # only stacks, which is why stage-1 looked heavier despite smaller batches.
+        # Heads/layer_weights still get grads: they only multiply the stacked tensor.
+        # Unfrozen: stack keeps the graph so backbone receives gradients.
         backbone_frozen = not any(p.requires_grad for p in self.hubert.parameters())
         if backbone_frozen:
-            all_layers = torch.stack(
-                [h.detach().clone() for h in outputs.hidden_states]
-            )  # [13, B, T, H]
+            with torch.no_grad():
+                all_layers = torch.stack(outputs.hidden_states, dim=0)  # [13, B, T, H]
         else:
             all_layers = torch.stack(outputs.hidden_states, dim=0)
 
