@@ -68,6 +68,16 @@ DEFAULT_SAMPLES_PER_STRATUM = 18
 DEFAULT_BATCH_SIZE = 8
 
 
+def _base_sample_id(sample_id: str) -> str:
+    if "__repad_" in sample_id:
+        return sample_id.split("__repad_", 1)[0]
+    return sample_id
+
+
+def _row_sample_id(row: dict[str, Any], idx: int) -> str:
+    return str(row.get("id", row.get("uid", f"row-{idx}")))
+
+
 def _norm_text(v: Any) -> str | None:
     if v is None:
         return None
@@ -344,7 +354,7 @@ def _reservoir_fill_rows(
             continue
         if "audio" not in row:
             continue
-        sample_id = str(row.get("id", row.get("uid", f"row-{idx}")))
+        sample_id = _row_sample_id(row, idx)
         if sample_id in exclude_ids:
             continue
         n_seen += 1
@@ -414,7 +424,7 @@ def _build_balanced_subset(
             stats.missing_audio_rows += 1
             continue
 
-        sample_id = str(row.get("id", row.get("uid", f"row-{idx}")))
+        sample_id = _row_sample_id(row, idx)
         if sample_id in stratum_universe[key]:
             continue
         stratum_universe[key].add(sample_id)
@@ -569,6 +579,83 @@ def _build_balanced_subset(
     return selected, counts, stats
 
 
+def _load_manifest_sample_ids(path: Path) -> list[str] | None:
+    if not path.exists():
+        return None
+    with open(path) as f:
+        data = json.load(f)
+    ids = data.get("validation_sample_ids")
+    if not isinstance(ids, list) or not ids:
+        return None
+    out = [str(x) for x in ids if str(x).strip()]
+    return out if out else None
+
+
+def _rows_from_sample_ids(
+    dataset,
+    *,
+    sample_ids: list[str],
+    target_emotions: list[str],
+    target_genders: list[str],
+    target_ages: list[str],
+) -> tuple[list[dict[str, Any]], BuildStats]:
+    stats = BuildStats()
+    needed_bases = {_base_sample_id(sid) for sid in sample_ids}
+    by_base_id: dict[str, dict[str, Any]] = {}
+
+    for idx, row in enumerate(dataset):
+        stats.scanned_rows += 1
+        rid = _row_sample_id(row, idx)
+        if rid in by_base_id:
+            continue
+
+        if not _is_non_augmented(row):
+            continue
+        stats.non_aug_rows += 1
+
+        emotion, gender, age = _extract_labels(row)
+        if emotion is None or gender is None or age is None:
+            stats.missing_label_rows += 1
+            continue
+
+        if emotion not in target_emotions or gender not in target_genders or age not in target_ages:
+            stats.out_of_target_rows += 1
+            continue
+
+        if "audio" not in row:
+            stats.missing_audio_rows += 1
+            continue
+
+        stats.valid_rows += 1
+        row_copy = dict(row)
+        row_copy["emotion"] = emotion
+        row_copy["gender"] = gender
+        row_copy["age_category"] = age
+        row_copy["sample_id"] = rid
+        by_base_id[rid] = row_copy
+
+        if len(needed_bases.intersection(by_base_id.keys())) == len(needed_bases):
+            break
+
+    missing = sorted(needed_bases.difference(by_base_id.keys()))
+    if missing:
+        preview = ", ".join(missing[:5])
+        suffix = "" if len(missing) <= 5 else f" ... (+{len(missing)-5} more)"
+        raise ValueError(
+            "subset-json references sample ids that are not present/eligible in this dataset split: "
+            f"{preview}{suffix}"
+        )
+
+    selected_rows: list[dict[str, Any]] = []
+    for sid in sample_ids:
+        base_id = _base_sample_id(sid)
+        row_copy = dict(by_base_id[base_id])
+        row_copy["sample_id"] = sid
+        selected_rows.append(row_copy)
+
+    return selected_rows, stats
+
+
 def _metrics_from_predictions(
     y_true: list[int],
     y_pred: list[int],
@@ -651,11 +738,19 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=_REPO_ROOT / "results" / "validation_subset_manifest.json",
     )
+    parser.add_argument(
+        "--force-rebuild-subset",
+        action="store_true",
+        help="Ignore existing --subset-json and rebuild subset from scratch.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    subset_json_explicit = any(
+        x == "--subset-json" or x.startswith("--subset-json=") for x in sys.argv[1:]
+    )
 
     load_dotenv(_REPO_ROOT / ".env")
     hf_token = os.environ.get("HF_TOKEN")
@@ -701,15 +796,56 @@ def main() -> None:
     print(f"[load] Ready: {len(split):,} rows. Building balanced non-augmented subset...", flush=True)
     dataset_iter = split
 
-    selected_rows, subset_counts, build_stats = _build_balanced_subset(
-        dataset_iter,
-        samples_per_stratum=args.samples_per_stratum,
-        target_emotions=target_emotions,
-        target_genders=target_genders,
-        target_ages=target_ages,
-        log_every=args.log_every,
-        fill_seed=args.fill_seed,
-    )
+    existing_subset_ids = None
+    reuse_subset = subset_json_explicit and args.subset_json.exists() and not args.force_rebuild_subset
+    if reuse_subset:
+        existing_subset_ids = _load_manifest_sample_ids(args.subset_json)
+        if existing_subset_ids:
+            print(
+                f"[build] Reusing existing subset manifest: {args.subset_json} "
+                f"(n={len(existing_subset_ids)}). Use --force-rebuild-subset to rebuild.",
+                flush=True,
+            )
+            selected_rows, build_stats = _rows_from_sample_ids(
+                dataset_iter,
+                sample_ids=existing_subset_ids,
+                target_emotions=target_emotions,
+                target_genders=target_genders,
+                target_ages=target_ages,
+            )
+            subset_counts = {
+                "success": True,
+                "sampling": "reused_from_subset_json",
+                "source_subset_json": str(args.subset_json),
+                "total": len(selected_rows),
+                "imperfect_stratification": None,
+                "partial_scan": None,
+            }
+        else:
+            print(
+                f"[build] Existing subset file has no validation_sample_ids: {args.subset_json}. "
+                "Falling back to rebuild.",
+                flush=True,
+            )
+            selected_rows, subset_counts, build_stats = _build_balanced_subset(
+                dataset_iter,
+                samples_per_stratum=args.samples_per_stratum,
+                target_emotions=target_emotions,
+                target_genders=target_genders,
+                target_ages=target_ages,
+                log_every=args.log_every,
+                fill_seed=args.fill_seed,
+            )
+    else:
+        selected_rows, subset_counts, build_stats = _build_balanced_subset(
+            dataset_iter,
+            samples_per_stratum=args.samples_per_stratum,
+            target_emotions=target_emotions,
+            target_genders=target_genders,
+            target_ages=target_ages,
+            log_every=args.log_every,
+            fill_seed=args.fill_seed,
+        )
 
     if selected_rows is None:
         args.subset_json.parent.mkdir(parents=True, exist_ok=True)
@@ -850,13 +986,16 @@ def main() -> None:
         "samples": sample_outputs,
     }
 
-    with open(args.subset_json, "w") as f:
-        json.dump(subset_manifest, f, indent=2)
+    if reuse_subset and existing_subset_ids:
+        print("Reused existing subset manifest:", args.subset_json)
+    else:
+        with open(args.subset_json, "w") as f:
+            json.dump(subset_manifest, f, indent=2)
+        print("Saved subset manifest:", args.subset_json)
 
     with open(args.out_json, "w") as f:
         json.dump(eval_report, f, indent=2)
 
-    print("Saved subset manifest:", args.subset_json)
     print("Saved evaluation report:", args.out_json)
     print(
         "Accuracies:",
