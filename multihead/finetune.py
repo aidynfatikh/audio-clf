@@ -137,7 +137,7 @@ def main() -> None:
     if UNFREEZE_FEATURE_PROJ:
         print("  Also unfreezing: feature_projection")
 
-    _dataset, train_split, val_split, composition = build_mixed_train_val_splits()
+    _dataset, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
     merged_for_encoders = {"train": train_split, "validation": val_split}
     print("Building label encoders...")
     emotion_encoder, gender_encoder, age_encoder = build_label_encoders(merged_for_encoders)
@@ -338,35 +338,37 @@ def main() -> None:
                 )
 
         if VAL_EVERY_STEPS > 0 and global_step % VAL_EVERY_STEPS == 0:
-            step_val = validate(
-                model, val_loader, criterion_emotion, criterion_gender,
-                criterion_age, device,
-                emotion_weight=EMOTION_WEIGHT,
-                gender_weight=GENDER_WEIGHT,
-                age_weight=AGE_WEIGHT,
-            )
-            model.train()  # validate() leaves model in eval mode
-            print(
-                f"  [Step {global_step}] Val Loss: {step_val['total']:.4f}  "
-                f"Emotion Acc: {step_val['emotion_acc']:.4f}  "
-                f"Gender Acc: {step_val['gender_acc']:.4f}  "
-                f"Age Acc: {step_val['age_acc']:.4f}"
-            )
+            step_record: dict = {"global_step": global_step, "epoch": payload['epoch'] + 1}
+            wandb_data: dict = {}
+            for _name, _vloader in val_loaders.items():
+                _prefix = "val" if _name == "val" else f"val_{_name}"
+                _sv = validate(
+                    model, _vloader, criterion_emotion, criterion_gender,
+                    criterion_age, device,
+                    emotion_weight=EMOTION_WEIGHT,
+                    gender_weight=GENDER_WEIGHT,
+                    age_weight=AGE_WEIGHT,
+                )
+                model.train()  # validate() leaves model in eval mode
+                print(
+                    f"  [Step {global_step}][{_name}] Val Loss: {_sv['total']:.4f}  "
+                    f"Emotion Acc: {_sv['emotion_acc']:.4f}  "
+                    f"Gender Acc: {_sv['gender_acc']:.4f}  "
+                    f"Age Acc: {_sv['age_acc']:.4f}"
+                )
+                wandb_data.update({
+                    f'{_prefix}/loss_total': float(_sv['total']),
+                    f'{_prefix}/loss_emotion': float(_sv['emotion']),
+                    f'{_prefix}/loss_gender': float(_sv['gender']),
+                    f'{_prefix}/loss_age': float(_sv['age']),
+                    f'{_prefix}/acc_emotion': float(_sv['emotion_acc']),
+                    f'{_prefix}/acc_gender': float(_sv['gender_acc']),
+                    f'{_prefix}/acc_age': float(_sv['age_acc']),
+                })
+                step_record[_prefix] = {k: round(float(v), 6) for k, v in _sv.items()}
             if wandb_run is not None:
-                wandb_run.log({
-                    'val/loss_total': float(step_val['total']),
-                    'val/loss_emotion': float(step_val['emotion']),
-                    'val/loss_gender': float(step_val['gender']),
-                    'val/loss_age': float(step_val['age']),
-                    'val/acc_emotion': float(step_val['emotion_acc']),
-                    'val/acc_gender': float(step_val['gender_acc']),
-                    'val/acc_age': float(step_val['age_acc']),
-                }, step=global_step)
-            all_step_val_metrics.append({
-                "global_step": global_step,
-                "epoch": payload['epoch'] + 1,
-                "val": {k: round(float(v), 6) for k, v in step_val.items()},
-            })
+                wandb_run.log(wandb_data, step=global_step)
+            all_step_val_metrics.append(step_record)
             with open(step_val_metrics_path, "w") as f:
                 json.dump(all_step_val_metrics, f, indent=2)
 
@@ -411,20 +413,22 @@ def main() -> None:
         train_split, processor, emotion_encoder, gender_encoder, age_encoder,
         is_train=True, noise_dir=os.environ.get("NOISE_DIR"),
     )
-    val_dataset = AudioDataset(
-        val_split, processor, emotion_encoder, gender_encoder, age_encoder,
-        is_train=False, noise_dir=None,
-    )
 
     pin = device.type == "cuda"
     train_loader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True,
         num_workers=4, pin_memory=pin, persistent_workers=True, prefetch_factor=2,
     )
-    val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=4, pin_memory=pin, persistent_workers=True, prefetch_factor=2,
-    )
+    val_loaders = {
+        name: DataLoader(
+            AudioDataset(split, processor, emotion_encoder, gender_encoder, age_encoder,
+                         is_train=False, noise_dir=None),
+            batch_size=BATCH_SIZE, shuffle=False,
+            num_workers=4, pin_memory=pin, persistent_workers=True, prefetch_factor=2,
+        )
+        for name, split in named_val_splits.items()
+    }
+    _primary_val = next(iter(val_loaders))
 
     criterion_emotion = nn.CrossEntropyLoss(label_smoothing=0.1)
     criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
@@ -461,52 +465,59 @@ def main() -> None:
         if stopped:
             break
 
-        val_metrics = validate(
-            model, val_loader, criterion_emotion, criterion_gender,
-            criterion_age, device,
-            emotion_weight=EMOTION_WEIGHT,
-            gender_weight=GENDER_WEIGHT,
-            age_weight=AGE_WEIGHT,
-        )
+        all_val_metrics: dict = {}
+        wandb_epoch_data: dict = {
+            'train/acc_emotion': float(train_metrics['emotion_acc']),
+            'train/acc_gender': float(train_metrics['gender_acc']),
+            'train/acc_age': float(train_metrics['age_acc']),
+        }
+        for _name, _vloader in val_loaders.items():
+            _prefix = "val" if _name == "val" else f"val_{_name}"
+            _vm = validate(
+                model, _vloader, criterion_emotion, criterion_gender,
+                criterion_age, device,
+                emotion_weight=EMOTION_WEIGHT,
+                gender_weight=GENDER_WEIGHT,
+                age_weight=AGE_WEIGHT,
+            )
+            all_val_metrics[_name] = _vm
+            wandb_epoch_data.update({
+                f'{_prefix}/loss_total': float(_vm['total']),
+                f'{_prefix}/loss_emotion': float(_vm['emotion']),
+                f'{_prefix}/loss_gender': float(_vm['gender']),
+                f'{_prefix}/loss_age': float(_vm['age']),
+                f'{_prefix}/acc_emotion': float(_vm['emotion_acc']),
+                f'{_prefix}/acc_gender': float(_vm['gender_acc']),
+                f'{_prefix}/acc_age': float(_vm['age_acc']),
+                f'{_prefix}/epoch': epoch + 1,
+            })
+            print(f"Val [{_name}] Loss: {_vm['total']:.4f}  "
+                  f"Emotion: {_vm['emotion']:.4f}  Gender: {_vm['gender']:.4f}  Age: {_vm['age']:.4f}")
+            print(f"Val [{_name}] Acc:  Emotion: {_vm['emotion_acc']:.4f}  "
+                  f"Gender: {_vm['gender_acc']:.4f}  Age: {_vm['age_acc']:.4f}")
         if wandb_run is not None:
-            wandb_run.log({
-                'train/acc_emotion': float(train_metrics['emotion_acc']),
-                'train/acc_gender': float(train_metrics['gender_acc']),
-                'train/acc_age': float(train_metrics['age_acc']),
-                'val/loss_total': float(val_metrics['total']),
-                'val/loss_emotion': float(val_metrics['emotion']),
-                'val/loss_gender': float(val_metrics['gender']),
-                'val/loss_age': float(val_metrics['age']),
-                'val/acc_emotion': float(val_metrics['emotion_acc']),
-                'val/acc_gender': float(val_metrics['gender_acc']),
-                'val/acc_age': float(val_metrics['age_acc']),
-                'val/epoch': epoch + 1,
-            }, step=step_state['global_step'])
+            wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if utils.stop_requested:
             break
 
-        print(f"Val   Loss - Total: {val_metrics['total']:.4f},  "
-              f"Emotion: {val_metrics['emotion']:.4f},  "
-              f"Gender: {val_metrics['gender']:.4f},  "
-              f"Age: {val_metrics['age']:.4f}")
-        print(f"Val   Acc  - Emotion: {val_metrics['emotion_acc']:.4f},  "
-              f"Gender: {val_metrics['gender_acc']:.4f},  "
-              f"Age: {val_metrics['age_acc']:.4f}")
+        val_metrics = all_val_metrics[_primary_val]  # primary split drives early stopping / best model
 
         def lp(w):
             return [round(x, 6) for x in torch.softmax(w, dim=0).detach().cpu().tolist()]
         _m = unwrap(model)
-        epoch_record = {
+        epoch_record: dict = {
             "epoch": epoch + 1,
             "unfrozen_layers": sorted(layers_to_unfreeze),
             "train": {k: round(float(v), 6) for k, v in train_metrics.items()},
-            "val": {k: round(float(v), 6) for k, v in val_metrics.items()},
             "layer_prefs": {
                 "emotion": lp(_m.emotion_weights),
                 "gender": lp(_m.gender_weights),
                 "age": lp(_m.age_weights),
             },
         }
+        for _name, _vm in all_val_metrics.items():
+            _key = "val" if _name == "val" else f"val_{_name}"
+            epoch_record[_key] = {k: round(float(v), 6) for k, v in _vm.items()}
         all_metrics.append(epoch_record)
         with open(metrics_path, "w") as f:
             json.dump(all_metrics, f, indent=2)

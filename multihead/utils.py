@@ -335,10 +335,12 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
     kazemo_val_count = 0
     kazemo_emotion_counts: dict = {}
 
+    holdout_val = val_split  # batch01 holdout only — saved before any Kazemo concat
     train_split = concatenate_datasets([train_b1, b2])
+    named_val_splits: dict = {}
 
     if USE_KAZEMO:
-        print(f"[data] USE_KAZEMO=1: appending Kazemo train only (not val); cap={KAZEMO_MAX_SAMPLES}")
+        print(f"[data] USE_KAZEMO=1: appending Kazemo to train+val (fraction={KAZEMO_VAL_FRACTION}); cap={KAZEMO_MAX_SAMPLES}")
         kz_ds: DatasetDict = load_kazemotts(cache_dir=str(DATA_DIR), max_samples=KAZEMO_MAX_SAMPLES)
         kz_base = kz_ds.get("train", kz_ds[list(kz_ds.keys())[0]])
         kz_base = _prepare_split_for_training(kz_base)
@@ -350,9 +352,17 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         kz_train = _force_canonical_label_schema(
             _prepare_split_for_training(kz_split["train"]), reference_split=train_b1
         )
+        kz_val = _force_canonical_label_schema(
+            _prepare_split_for_training(kz_split["test"]), reference_split=holdout_val
+        )
         kazemo_train_count = len(kz_train)
+        kazemo_val_count = len(kz_val)
         kazemo_emotion_counts = _count_emotion_distribution(kz_base)
         train_split = concatenate_datasets([train_split, kz_train])
+        val_split = concatenate_datasets([holdout_val, kz_val])
+        named_val_splits = {"holdout": holdout_val, "kazemo": kz_val}
+    else:
+        named_val_splits = {"holdout": holdout_val}
 
     composition = {
         "mode": "holdout_manifest",
@@ -363,7 +373,7 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         "batch01_train_only": len(train_b1),
         "batch02_train_only": len(b2),
         "hf_train": len(train_b1),
-        "hf_val": len(val_split),
+        "hf_val": len(holdout_val),
         "kazemo_train": kazemo_train_count,
         "kazemo_val": kazemo_val_count,
         "kazemo_emotion_counts": kazemo_emotion_counts,
@@ -372,8 +382,8 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         "train_label_counts": _count_label_presence(train_split),
         "val_label_counts": _count_label_presence(val_split),
     }
-    merged_hf = DatasetDict({"batch01_train": train_b1, "batch01_val_holdout": val_split, "batch02_train": b2})
-    return merged_hf, train_split, val_split, composition
+    merged_hf = DatasetDict({"batch01_train": train_b1, "batch01_val_holdout": holdout_val, "batch02_train": b2})
+    return merged_hf, train_split, val_split, named_val_splits, composition
 
 
 def _resolve_train_val_manifest_path(raw: str) -> Path:
@@ -425,6 +435,8 @@ def build_mixed_train_val_splits():
     kazemo_val_count = 0
     kazemo_emotion_counts = {}
 
+    named_val_splits: dict = {}
+
     if USE_KAZEMO:
         print(f"Loading Kazemo dataset (max_samples={KAZEMO_MAX_SAMPLES})...")
         kz_ds: DatasetDict = load_kazemotts(cache_dir=str(DATA_DIR), max_samples=KAZEMO_MAX_SAMPLES)
@@ -443,6 +455,9 @@ def build_mixed_train_val_splits():
 
         train_split = concatenate_datasets([hf_train, kz_train])
         val_split = concatenate_datasets([hf_val, kz_val])
+        named_val_splits = {"hf": hf_val, "kazemo": kz_val}
+    else:
+        named_val_splits = {"val": val_split}
 
     composition = {
         "hf_train": len(hf_train),
@@ -455,7 +470,7 @@ def build_mixed_train_val_splits():
         "train_label_counts": _count_label_presence(train_split),
         "val_label_counts": _count_label_presence(val_split),
     }
-    return hf_dataset, train_split, val_split, composition
+    return hf_dataset, train_split, val_split, named_val_splits, composition
 
 
 class AudioDataset(Dataset):
