@@ -364,6 +364,10 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
     else:
         named_val_splits = {"val": holdout_val}
 
+    named_val_tasks = {name: set(_ALL_TASKS) for name in named_val_splits}
+    if "kazemo" in named_val_tasks:
+        named_val_tasks["kazemo"] = set(_KAZEMO_TASKS)
+
     composition = {
         "mode": "holdout_manifest",
         "manifest": str(manifest_path),
@@ -382,6 +386,7 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         "train_label_counts": _count_label_presence(train_split),
         "val_label_counts": _count_label_presence(val_split),
     }
+    composition["named_val_tasks"] = named_val_tasks
     merged_hf = DatasetDict({"batch01_train": train_b1, "batch01_val_holdout": holdout_val, "batch02_train": b2})
     return merged_hf, train_split, val_split, named_val_splits, composition
 
@@ -459,6 +464,10 @@ def build_mixed_train_val_splits():
     else:
         named_val_splits = {"val": val_split}
 
+    named_val_tasks = {name: set(_ALL_TASKS) for name in named_val_splits}
+    if "kazemo" in named_val_tasks:
+        named_val_tasks["kazemo"] = set(_KAZEMO_TASKS)
+
     composition = {
         "hf_train": len(hf_train),
         "hf_val": len(hf_val),
@@ -470,6 +479,7 @@ def build_mixed_train_val_splits():
         "train_label_counts": _count_label_presence(train_split),
         "val_label_counts": _count_label_presence(val_split),
     }
+    composition["named_val_tasks"] = named_val_tasks
     return hf_dataset, train_split, val_split, named_val_splits, composition
 
 
@@ -622,6 +632,46 @@ def build_label_encoders(dataset):
         age_encoder["unknown"] = len(age_encoder)
 
     return emotion_encoder, gender_encoder, age_encoder
+
+
+_ALL_TASKS: frozenset = frozenset({"emotion", "gender", "age"})
+_KAZEMO_TASKS: frozenset = frozenset({"emotion"})
+
+
+_VAL_METRIC_TO_WANDB = {
+    "total": "loss_total",
+    "emotion": "loss_emotion",
+    "gender": "loss_gender",
+    "age": "loss_age",
+    "emotion_acc": "acc_emotion",
+    "gender_acc": "acc_gender",
+    "age_acc": "acc_age",
+}
+
+
+def _wandb_val_keys(prefix: str, metrics: dict) -> dict:
+    """Map a filtered metrics dict to ``prefix/wandb_key`` pairs."""
+    return {f"{prefix}/{_VAL_METRIC_TO_WANDB[k]}": float(v) for k, v in metrics.items()}
+
+
+def filter_val_metrics(metrics: dict, tasks) -> dict:
+    """Return a copy of *metrics* containing only keys relevant to *tasks*.
+
+    Always includes ``total``, ``emotion``, and ``emotion_acc``.  Gender and
+    age keys are included only when the corresponding task is in *tasks*.
+    """
+    out: dict = {
+        "total": metrics["total"],
+        "emotion": metrics["emotion"],
+        "emotion_acc": metrics["emotion_acc"],
+    }
+    if "gender" in tasks:
+        out["gender"] = metrics["gender"]
+        out["gender_acc"] = metrics["gender_acc"]
+    if "age" in tasks:
+        out["age"] = metrics["age"]
+        out["age_acc"] = metrics["age_acc"]
+    return out
 
 
 def train_epoch(
@@ -919,6 +969,7 @@ def make_batch_end_handler(
     # step-level validation
     val_every_steps: int,
     val_loaders: dict,
+    val_tasks: dict,
     criterion_emotion,
     criterion_gender,
     criterion_age,
@@ -1014,29 +1065,25 @@ def make_batch_end_handler(
             wandb_data: dict = {}
             for _name, _vloader in val_loaders.items():
                 _prefix = "val" if _name == "val" else f"val_{_name}"
-                _sv = validate(
+                _tasks = val_tasks.get(_name, _ALL_TASKS)
+                _sv = filter_val_metrics(validate(
                     model, _vloader, criterion_emotion, criterion_gender,
                     criterion_age, device,
                     emotion_weight=emotion_weight,
                     gender_weight=gender_weight,
                     age_weight=age_weight,
-                )
+                ), _tasks)
                 model.train()  # validate() leaves model in eval mode
-                print(
+                _print = (
                     f"  [Step {global_step}][{_name}] Val Loss: {_sv['total']:.4f}  "
-                    f"Emotion Acc: {_sv['emotion_acc']:.4f}  "
-                    f"Gender Acc: {_sv['gender_acc']:.4f}  "
-                    f"Age Acc: {_sv['age_acc']:.4f}"
+                    f"Emotion Acc: {_sv['emotion_acc']:.4f}"
                 )
-                wandb_data.update({
-                    f'{_prefix}/loss_total': float(_sv['total']),
-                    f'{_prefix}/loss_emotion': float(_sv['emotion']),
-                    f'{_prefix}/loss_gender': float(_sv['gender']),
-                    f'{_prefix}/loss_age': float(_sv['age']),
-                    f'{_prefix}/acc_emotion': float(_sv['emotion_acc']),
-                    f'{_prefix}/acc_gender': float(_sv['gender_acc']),
-                    f'{_prefix}/acc_age': float(_sv['age_acc']),
-                })
+                if "gender" in _tasks:
+                    _print += f"  Gender Acc: {_sv['gender_acc']:.4f}"
+                if "age" in _tasks:
+                    _print += f"  Age Acc: {_sv['age_acc']:.4f}"
+                print(_print)
+                wandb_data.update(_wandb_val_keys(_prefix, _sv))
                 step_record[_prefix] = {k: round(float(v), 6) for k, v in _sv.items()}
             if wandb_run is not None:
                 wandb_run.log(wandb_data, step=global_step)

@@ -47,9 +47,12 @@ from multihead.utils import (
     RANDOM_SEED,
     SAMPLE_RATE,
     USE_KAZEMO,
+    _ALL_TASKS,
+    _wandb_val_keys,
     apply_cuda_perf_flags,
     build_label_encoders,
     build_mixed_train_val_splits,
+    filter_val_metrics,
     make_batch_end_handler,
     make_cosine_schedule,
     rotate_step_checkpoints,
@@ -100,6 +103,7 @@ def main():
     print("Press Ctrl+C to stop training and save a checkpoint.")
 
     _dataset, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
+    named_val_tasks: dict = composition.get("named_val_tasks", {})
     merged_for_encoders = DatasetDict({"train": train_split, "validation": val_split})
 
     print("Building label encoders...")
@@ -288,6 +292,7 @@ def main():
         step_val_metrics_path=step_val_metrics_path,
         val_every_steps=VAL_EVERY_STEPS,
         val_loaders=val_loaders,
+        val_tasks=named_val_tasks,
         criterion_emotion=criterion_emotion,
         criterion_gender=criterion_gender,
         criterion_age=criterion_age,
@@ -347,28 +352,30 @@ def main():
         }
         for _name, _vloader in val_loaders.items():
             _prefix = "val" if _name == "val" else f"val_{_name}"
-            _vm = validate(
+            _tasks = named_val_tasks.get(_name, _ALL_TASKS)
+            _vm = filter_val_metrics(validate(
                 model, _vloader, criterion_emotion, criterion_gender,
                 criterion_age, DEVICE,
                 emotion_weight=EMOTION_WEIGHT,
                 gender_weight=GENDER_WEIGHT,
                 age_weight=AGE_WEIGHT,
-            )
+            ), _tasks)
             all_val_metrics[_name] = _vm
-            wandb_epoch_data.update({
-                f'{_prefix}/loss_total': float(_vm['total']),
-                f'{_prefix}/loss_emotion': float(_vm['emotion']),
-                f'{_prefix}/loss_gender': float(_vm['gender']),
-                f'{_prefix}/loss_age': float(_vm['age']),
-                f'{_prefix}/acc_emotion': float(_vm['emotion_acc']),
-                f'{_prefix}/acc_gender': float(_vm['gender_acc']),
-                f'{_prefix}/acc_age': float(_vm['age_acc']),
-                f'{_prefix}/epoch': epoch + 1,
-            })
-            print(f"Val [{_name}] Loss: {_vm['total']:.4f}  "
-                  f"Emotion: {_vm['emotion']:.4f}  Gender: {_vm['gender']:.4f}  Age: {_vm['age']:.4f}")
-            print(f"Val [{_name}] Acc:  Emotion: {_vm['emotion_acc']:.4f}  "
-                  f"Gender: {_vm['gender_acc']:.4f}  Age: {_vm['age_acc']:.4f}")
+            wandb_epoch_data.update(_wandb_val_keys(_prefix, _vm))
+            wandb_epoch_data[f'{_prefix}/epoch'] = epoch + 1
+            _loss_line = (f"Val [{_name}] Loss: {_vm['total']:.4f}  "
+                          f"Emotion: {_vm['emotion']:.4f}")
+            if "gender" in _tasks:
+                _loss_line += f"  Gender: {_vm['gender']:.4f}"
+            if "age" in _tasks:
+                _loss_line += f"  Age: {_vm['age']:.4f}"
+            print(_loss_line)
+            _acc_line = f"Val [{_name}] Acc:  Emotion: {_vm['emotion_acc']:.4f}"
+            if "gender" in _tasks:
+                _acc_line += f"  Gender: {_vm['gender_acc']:.4f}"
+            if "age" in _tasks:
+                _acc_line += f"  Age: {_vm['age_acc']:.4f}"
+            print(_acc_line)
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if utils.stop_requested:
