@@ -50,6 +50,7 @@ from multihead.utils import (
     apply_cuda_perf_flags,
     build_label_encoders,
     build_mixed_train_val_splits,
+    make_batch_end_handler,
     make_cosine_schedule,
     rotate_step_checkpoints,
     save_step_checkpoint,
@@ -203,7 +204,7 @@ def main():
     metrics_path = MODEL_DIR / "training_metrics.json"
     latest_path = MODEL_DIR / "latest_checkpoint.pt"
     step_ckpt_dir = MODEL_DIR / "steps"
-    best_val_loss = float('inf')
+    train_state = {'best_val_loss': float('inf')}
     last_epoch = -1
     all_metrics = []
     all_step_val_metrics: list[dict] = []
@@ -223,7 +224,7 @@ def main():
                 and ckpt["epoch"] + 1 < NUM_EPOCHS):
             model.load_state_dict(ckpt["model_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            best_val_loss = ckpt.get("best_val_loss", float("inf"))
+            train_state['best_val_loss'] = ckpt.get("best_val_loss", float("inf"))
             start_epoch = ckpt["epoch"] + 1
             step_state['global_step'] = int(ckpt.get('global_step', 0))
             step_state['samples_seen'] = int(ckpt.get('samples_seen', 0))
@@ -269,105 +270,38 @@ def main():
                 wandb_kwargs['mode'] = WANDB_MODE
             wandb_run = wandb.init(**wandb_kwargs)
 
-    def _on_train_batch_end(payload):
-        global_step = payload['global_step']
-        if wandb_run is not None:
-            data = {
-                'train/loss_total': payload['train_total_loss'],
-                'train/epoch': payload['epoch'] + 1,
-            }
-            if payload['train_emotion_loss'] is not None:
-                data['train/loss_emotion'] = payload['train_emotion_loss']
-            if payload['train_gender_loss'] is not None:
-                data['train/loss_gender'] = payload['train_gender_loss']
-            if payload['train_age_loss'] is not None:
-                data['train/loss_age'] = payload['train_age_loss']
-            wandb_run.log(data, step=global_step)
-
-        if CHECKPOINT_EVERY_STEPS > 0 and global_step % CHECKPOINT_EVERY_STEPS == 0:
-            step_path = save_step_checkpoint(
-                step_dir=step_ckpt_dir,
-                global_step=global_step,
-                epoch=payload['epoch'],
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                best_val_loss=best_val_loss,
-                num_emotions=num_emotions,
-                num_genders=num_genders,
-                num_ages=num_ages,
-                samples_seen=step_state['samples_seen'],
-            )
-            rotate_step_checkpoints(step_ckpt_dir, CHECKPOINT_KEEP_LAST_N_STEP_FILES)
-            print(f"Saved step checkpoint: {step_path.name}")
-
-            if CHECKPOINT_SAVE_LATEST_EVERY_STEPS:
-                torch.save({
-                    'epoch': payload['epoch'],
-                    'global_step': global_step,
-                    'samples_seen': step_state['samples_seen'],
-                    'model_state_dict': unwrap(model).state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'num_emotions': num_emotions,
-                    'num_genders': num_genders,
-                    'num_ages': num_ages,
-                }, latest_path)
-
-            if wandb_run is not None and WANDB_UPLOAD_STEP_ARTIFACT:
-                save_wandb_file_artifact(
-                    wandb_run,
-                    file_path=step_path,
-                    name="stage1-step",
-                    artifact_type='checkpoint',
-                )
-
-            if (wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT
-                    and WANDB_LATEST_ARTIFACT_EVERY_STEPS > 0
-                    and global_step % WANDB_LATEST_ARTIFACT_EVERY_STEPS == 0
-                    and latest_path.exists()):
-                save_wandb_file_artifact(
-                    wandb_run,
-                    file_path=latest_path,
-                    name="stage1-latest",
-                    artifact_type='checkpoint',
-                )
-
-        if VAL_EVERY_STEPS > 0 and global_step % VAL_EVERY_STEPS == 0:
-            step_record: dict = {"global_step": global_step, "epoch": payload['epoch'] + 1}
-            wandb_data: dict = {}
-            for _name, _vloader in val_loaders.items():
-                _prefix = "val" if _name == "val" else f"val_{_name}"
-                _sv = validate(
-                    model, _vloader, criterion_emotion, criterion_gender,
-                    criterion_age, DEVICE,
-                    emotion_weight=EMOTION_WEIGHT,
-                    gender_weight=GENDER_WEIGHT,
-                    age_weight=AGE_WEIGHT,
-                )
-                model.train()  # validate() leaves model in eval mode
-                print(
-                    f"  [Step {global_step}][{_name}] Val Loss: {_sv['total']:.4f}  "
-                    f"Emotion Acc: {_sv['emotion_acc']:.4f}  "
-                    f"Gender Acc: {_sv['gender_acc']:.4f}  "
-                    f"Age Acc: {_sv['age_acc']:.4f}"
-                )
-                wandb_data.update({
-                    f'{_prefix}/loss_total': float(_sv['total']),
-                    f'{_prefix}/loss_emotion': float(_sv['emotion']),
-                    f'{_prefix}/loss_gender': float(_sv['gender']),
-                    f'{_prefix}/loss_age': float(_sv['age']),
-                    f'{_prefix}/acc_emotion': float(_sv['emotion_acc']),
-                    f'{_prefix}/acc_gender': float(_sv['gender_acc']),
-                    f'{_prefix}/acc_age': float(_sv['age_acc']),
-                })
-                step_record[_prefix] = {k: round(float(v), 6) for k, v in _sv.items()}
-            if wandb_run is not None:
-                wandb_run.log(wandb_data, step=global_step)
-            all_step_val_metrics.append(step_record)
-            with open(step_val_metrics_path, "w") as f:
-                json.dump(all_step_val_metrics, f, indent=2)
+    _on_train_batch_end = make_batch_end_handler(
+        step_state=step_state,
+        train_state=train_state,
+        all_step_val_metrics=all_step_val_metrics,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        num_emotions=num_emotions,
+        num_genders=num_genders,
+        num_ages=num_ages,
+        checkpoint_every_steps=CHECKPOINT_EVERY_STEPS,
+        checkpoint_keep_last_n=CHECKPOINT_KEEP_LAST_N_STEP_FILES,
+        checkpoint_save_latest_every_steps=CHECKPOINT_SAVE_LATEST_EVERY_STEPS,
+        step_ckpt_dir=step_ckpt_dir,
+        latest_path=latest_path,
+        step_val_metrics_path=step_val_metrics_path,
+        val_every_steps=VAL_EVERY_STEPS,
+        val_loaders=val_loaders,
+        criterion_emotion=criterion_emotion,
+        criterion_gender=criterion_gender,
+        criterion_age=criterion_age,
+        device=DEVICE,
+        emotion_weight=EMOTION_WEIGHT,
+        gender_weight=GENDER_WEIGHT,
+        age_weight=AGE_WEIGHT,
+        wandb_run=wandb_run,
+        wandb_upload_step_artifact=WANDB_UPLOAD_STEP_ARTIFACT,
+        wandb_upload_latest_artifact=WANDB_UPLOAD_LATEST_ARTIFACT,
+        wandb_latest_artifact_every_steps=WANDB_LATEST_ARTIFACT_EVERY_STEPS,
+        step_artifact_name="stage1-step",
+        latest_artifact_name="stage1-latest",
+    )
 
     if DEVICE.type == 'cuda' and hasattr(torch, 'compile'):
         try:
@@ -462,8 +396,8 @@ def main():
             json.dump(all_metrics, f, indent=2)
         print(f"Saved metrics to {metrics_path}")
 
-        if val_metrics['total'] < best_val_loss:
-            best_val_loss = val_metrics['total']
+        if val_metrics['total'] < train_state['best_val_loss']:
+            train_state['best_val_loss'] = val_metrics['total']
             epochs_without_improvement = 0
             model_path = MODEL_DIR / "best_model.pt"
             torch.save({
@@ -472,7 +406,7 @@ def main():
                 'samples_seen': step_state['samples_seen'],
                 'model_state_dict': unwrap(model).state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': best_val_loss,
+                'val_loss': train_state['best_val_loss'],
                 'num_emotions': num_emotions,
                 'num_genders': num_genders,
                 'num_ages': num_ages,
@@ -501,7 +435,7 @@ def main():
             'model_state_dict': unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
-            'best_val_loss': best_val_loss,
+            'best_val_loss': train_state['best_val_loss'],
             'num_emotions': num_emotions,
             'num_genders': num_genders,
             'num_ages': num_ages,
@@ -529,7 +463,7 @@ def main():
         print(f"\nStopped by user. Checkpoint saved to {checkpoint_path}")
     else:
         print("\nTraining completed!")
-    print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Best validation loss: {train_state['best_val_loss']:.4f}")
     if wandb_run is not None:
         wandb_run.finish()
 

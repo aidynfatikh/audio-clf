@@ -360,9 +360,9 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         kazemo_emotion_counts = _count_emotion_distribution(kz_base)
         train_split = concatenate_datasets([train_split, kz_train])
         val_split = concatenate_datasets([holdout_val, kz_val])
-        named_val_splits = {"holdout": holdout_val, "kazemo": kz_val}
+        named_val_splits = {"val": holdout_val, "kazemo": kz_val}
     else:
-        named_val_splits = {"holdout": holdout_val}
+        named_val_splits = {"val": holdout_val}
 
     composition = {
         "mode": "holdout_manifest",
@@ -455,7 +455,7 @@ def build_mixed_train_val_splits():
 
         train_split = concatenate_datasets([hf_train, kz_train])
         val_split = concatenate_datasets([hf_val, kz_val])
-        named_val_splits = {"hf": hf_val, "kazemo": kz_val}
+        named_val_splits = {"val": hf_val, "kazemo": kz_val}
     else:
         named_val_splits = {"val": val_split}
 
@@ -894,3 +894,154 @@ def validate(
         "gender_acc": gender_correct / gender_samples,
         "age_acc": age_correct / age_samples,
     }
+
+
+def make_batch_end_handler(
+    *,
+    # mutable shared state
+    step_state: dict,
+    train_state: dict,
+    all_step_val_metrics: list,
+    # model / optimiser / scheduler
+    model,
+    optimizer,
+    scheduler,
+    num_emotions: int,
+    num_genders: int,
+    num_ages: int,
+    # checkpointing
+    checkpoint_every_steps: int,
+    checkpoint_keep_last_n: int,
+    checkpoint_save_latest_every_steps: bool,
+    step_ckpt_dir: Path,
+    latest_path: Path,
+    step_val_metrics_path: Path,
+    # step-level validation
+    val_every_steps: int,
+    val_loaders: dict,
+    criterion_emotion,
+    criterion_gender,
+    criterion_age,
+    device,
+    emotion_weight: float,
+    gender_weight: float,
+    age_weight: float,
+    # wandb
+    wandb_run,
+    wandb_upload_step_artifact: bool,
+    wandb_upload_latest_artifact: bool,
+    wandb_latest_artifact_every_steps: int,
+    step_artifact_name: str,
+    latest_artifact_name: str,
+):
+    """Return an ``on_batch_end`` callback suitable for passing to ``train_epoch``.
+
+    All configuration is captured at factory-call time.  ``train_state`` and
+    ``step_state`` are read at handler-call time so the handler always sees the
+    current ``best_val_loss`` and ``global_step``.
+    """
+    def _handler(payload):
+        global_step = payload['global_step']
+
+        # ── W&B per-batch train loss ─────────────────────────────────────────
+        if wandb_run is not None:
+            data = {
+                'train/loss_total': payload['train_total_loss'],
+                'train/epoch': payload['epoch'] + 1,
+            }
+            if payload['train_emotion_loss'] is not None:
+                data['train/loss_emotion'] = payload['train_emotion_loss']
+            if payload['train_gender_loss'] is not None:
+                data['train/loss_gender'] = payload['train_gender_loss']
+            if payload['train_age_loss'] is not None:
+                data['train/loss_age'] = payload['train_age_loss']
+            wandb_run.log(data, step=global_step)
+
+        # ── Step checkpoint ──────────────────────────────────────────────────
+        if checkpoint_every_steps > 0 and global_step % checkpoint_every_steps == 0:
+            step_path = save_step_checkpoint(
+                step_dir=step_ckpt_dir,
+                global_step=global_step,
+                epoch=payload['epoch'],
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                best_val_loss=train_state['best_val_loss'],
+                num_emotions=num_emotions,
+                num_genders=num_genders,
+                num_ages=num_ages,
+                samples_seen=step_state['samples_seen'],
+            )
+            rotate_step_checkpoints(step_ckpt_dir, checkpoint_keep_last_n)
+            print(f"Saved step checkpoint: {step_path.name}")
+
+            if checkpoint_save_latest_every_steps:
+                torch.save({
+                    'epoch': payload['epoch'],
+                    'global_step': global_step,
+                    'samples_seen': step_state['samples_seen'],
+                    'model_state_dict': unwrap(model).state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': train_state['best_val_loss'],
+                    'num_emotions': num_emotions,
+                    'num_genders': num_genders,
+                    'num_ages': num_ages,
+                }, latest_path)
+
+            if wandb_run is not None and wandb_upload_step_artifact:
+                save_wandb_file_artifact(
+                    wandb_run,
+                    file_path=step_path,
+                    name=step_artifact_name,
+                    artifact_type='checkpoint',
+                )
+
+            if (wandb_run is not None and wandb_upload_latest_artifact
+                    and wandb_latest_artifact_every_steps > 0
+                    and global_step % wandb_latest_artifact_every_steps == 0
+                    and latest_path.exists()):
+                save_wandb_file_artifact(
+                    wandb_run,
+                    file_path=latest_path,
+                    name=latest_artifact_name,
+                    artifact_type='checkpoint',
+                )
+
+        # ── Step-level validation ────────────────────────────────────────────
+        if val_every_steps > 0 and global_step % val_every_steps == 0:
+            step_record: dict = {"global_step": global_step, "epoch": payload['epoch'] + 1}
+            wandb_data: dict = {}
+            for _name, _vloader in val_loaders.items():
+                _prefix = "val" if _name == "val" else f"val_{_name}"
+                _sv = validate(
+                    model, _vloader, criterion_emotion, criterion_gender,
+                    criterion_age, device,
+                    emotion_weight=emotion_weight,
+                    gender_weight=gender_weight,
+                    age_weight=age_weight,
+                )
+                model.train()  # validate() leaves model in eval mode
+                print(
+                    f"  [Step {global_step}][{_name}] Val Loss: {_sv['total']:.4f}  "
+                    f"Emotion Acc: {_sv['emotion_acc']:.4f}  "
+                    f"Gender Acc: {_sv['gender_acc']:.4f}  "
+                    f"Age Acc: {_sv['age_acc']:.4f}"
+                )
+                wandb_data.update({
+                    f'{_prefix}/loss_total': float(_sv['total']),
+                    f'{_prefix}/loss_emotion': float(_sv['emotion']),
+                    f'{_prefix}/loss_gender': float(_sv['gender']),
+                    f'{_prefix}/loss_age': float(_sv['age']),
+                    f'{_prefix}/acc_emotion': float(_sv['emotion_acc']),
+                    f'{_prefix}/acc_gender': float(_sv['gender_acc']),
+                    f'{_prefix}/acc_age': float(_sv['age_acc']),
+                })
+                step_record[_prefix] = {k: round(float(v), 6) for k, v in _sv.items()}
+            if wandb_run is not None:
+                wandb_run.log(wandb_data, step=global_step)
+            all_step_val_metrics.append(step_record)
+            with open(step_val_metrics_path, "w") as f:
+                json.dump(all_step_val_metrics, f, indent=2)
+
+    return _handler
