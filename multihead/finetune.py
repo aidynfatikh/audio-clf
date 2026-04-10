@@ -277,40 +277,6 @@ def main() -> None:
                 wandb_kwargs['mode'] = WANDB_MODE
             wandb_run = wandb.init(**wandb_kwargs)
 
-    _on_train_batch_end = make_batch_end_handler(
-        step_state=step_state,
-        train_state=train_state,
-        all_step_val_metrics=all_step_val_metrics,
-        model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        num_emotions=num_emotions,
-        num_genders=num_genders,
-        num_ages=num_ages,
-        checkpoint_every_steps=CHECKPOINT_EVERY_STEPS,
-        checkpoint_keep_last_n=CHECKPOINT_KEEP_LAST_N_STEP_FILES,
-        checkpoint_save_latest_every_steps=CHECKPOINT_SAVE_LATEST_EVERY_STEPS,
-        step_ckpt_dir=step_ckpt_dir,
-        latest_path=latest_ft_path,
-        step_val_metrics_path=step_val_metrics_path,
-        val_every_steps=VAL_EVERY_STEPS,
-        val_loaders=val_loaders,
-        val_tasks=named_val_tasks,
-        criterion_emotion=criterion_emotion,
-        criterion_gender=criterion_gender,
-        criterion_age=criterion_age,
-        device=device,
-        emotion_weight=EMOTION_WEIGHT,
-        gender_weight=GENDER_WEIGHT,
-        age_weight=AGE_WEIGHT,
-        wandb_run=wandb_run,
-        wandb_upload_step_artifact=WANDB_UPLOAD_STEP_ARTIFACT,
-        wandb_upload_latest_artifact=WANDB_UPLOAD_LATEST_ARTIFACT,
-        wandb_latest_artifact_every_steps=WANDB_LATEST_ARTIFACT_EVERY_STEPS,
-        step_artifact_name="stage2-step",
-        latest_artifact_name="stage2-latest",
-    )
-
     if device.type == 'cuda' and hasattr(torch, 'compile'):
         try:
             print("Compiling model with torch.compile(mode='default')...")
@@ -372,6 +338,40 @@ def main() -> None:
     criterion_emotion = nn.CrossEntropyLoss(label_smoothing=0.1)
     criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
     criterion_age = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    _on_train_batch_end = make_batch_end_handler(
+        step_state=step_state,
+        train_state=train_state,
+        all_step_val_metrics=all_step_val_metrics,
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        num_emotions=num_emotions,
+        num_genders=num_genders,
+        num_ages=num_ages,
+        checkpoint_every_steps=CHECKPOINT_EVERY_STEPS,
+        checkpoint_keep_last_n=CHECKPOINT_KEEP_LAST_N_STEP_FILES,
+        checkpoint_save_latest_every_steps=CHECKPOINT_SAVE_LATEST_EVERY_STEPS,
+        step_ckpt_dir=step_ckpt_dir,
+        latest_path=latest_ft_path,
+        step_val_metrics_path=step_val_metrics_path,
+        val_every_steps=VAL_EVERY_STEPS,
+        val_loaders=val_loaders,
+        val_tasks=named_val_tasks,
+        criterion_emotion=criterion_emotion,
+        criterion_gender=criterion_gender,
+        criterion_age=criterion_age,
+        device=device,
+        emotion_weight=EMOTION_WEIGHT,
+        gender_weight=GENDER_WEIGHT,
+        age_weight=AGE_WEIGHT,
+        wandb_run=wandb_run,
+        wandb_upload_step_artifact=WANDB_UPLOAD_STEP_ARTIFACT,
+        wandb_upload_latest_artifact=WANDB_UPLOAD_LATEST_ARTIFACT,
+        wandb_latest_artifact_every_steps=WANDB_LATEST_ARTIFACT_EVERY_STEPS,
+        step_artifact_name="stage2-step",
+        latest_artifact_name="stage2-latest",
+    )
 
     print(f"\nStarting fine-tuning for {NUM_EPOCHS} epochs. Press Ctrl+C to stop and save.")
 
