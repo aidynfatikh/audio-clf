@@ -599,9 +599,6 @@ def build_label_encoders(dataset):
     emotions = set()
     genders = set()
     age_categories = set()
-    has_missing_emotion = False
-    has_missing_gender = False
-    has_missing_age = False
 
     for split_name in dataset.keys():
         split = dataset[split_name]
@@ -609,27 +606,14 @@ def build_label_encoders(dataset):
         for row in split_no_audio:
             if "emotion" in row and row["emotion"] is not None and str(row["emotion"]).strip():
                 emotions.add(str(row["emotion"]).strip())
-            else:
-                has_missing_emotion = True
             if "gender" in row and row["gender"] is not None and str(row["gender"]).strip():
                 genders.add(str(row["gender"]).strip())
-            else:
-                has_missing_gender = True
             if "age_category" in row and row["age_category"] is not None and str(row["age_category"]).strip():
                 age_categories.add(str(row["age_category"]).strip())
-            else:
-                has_missing_age = True
 
     emotion_encoder = {label: idx for idx, label in enumerate(sorted(emotions))}
     gender_encoder = {label: idx for idx, label in enumerate(sorted(genders))}
     age_encoder = {label: idx for idx, label in enumerate(sorted(age_categories))}
-
-    if has_missing_emotion:
-        emotion_encoder["unknown"] = len(emotion_encoder)
-    if has_missing_gender:
-        gender_encoder["unknown"] = len(gender_encoder)
-    if has_missing_age:
-        age_encoder["unknown"] = len(age_encoder)
 
     return emotion_encoder, gender_encoder, age_encoder
 
