@@ -16,10 +16,10 @@ el_audios/
 01_hold_lr_run/
 02_warmup_lr_run/
 03_regularized_run/
-models-s
+
 test
 kazemotts_emotion_metrics.json
 wandb/
-models-baseline
+models*/
 eval-baseline
 results*/

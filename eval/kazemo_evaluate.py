@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
@@ -27,6 +28,100 @@ from loaders.load_data import read_audio
 from multihead.utils import MODEL_DIR, SAMPLE_RATE
 
 from loaders.kazemo.load_data import load_kazemotts
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m {secs}s"
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _estimate_training_span_from_files(ckpt_path: Path) -> tuple[datetime, datetime] | None:
+    if "finetune" in ckpt_path.parts:
+        run_dir = ckpt_path.parent
+        latest = run_dir / "latest_checkpoint_finetune.pt"
+    else:
+        run_dir = ckpt_path.parent
+        latest = run_dir / "latest_checkpoint.pt"
+
+    candidates = [ckpt_path]
+    if latest.exists():
+        candidates.append(latest)
+
+    step_dir = run_dir / "steps"
+    if step_dir.exists():
+        candidates.extend(step_dir.glob("step_*.pt"))
+
+    if not candidates:
+        return None
+
+    mtimes = []
+    for p in candidates:
+        try:
+            mtimes.append((Path(p), Path(p).stat().st_mtime))
+        except OSError:
+            continue
+
+    if not mtimes:
+        return None
+
+    _, start_ts = min(mtimes, key=lambda x: x[1])
+    _, end_ts = max(mtimes, key=lambda x: x[1])
+    return (datetime.fromtimestamp(start_ts), datetime.fromtimestamp(end_ts))
+
+
+def print_training_details(ckpt_path: Path) -> None:
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    epoch_idx = ckpt.get("epoch")
+    trained_epochs = int(epoch_idx) + 1 if epoch_idx is not None else None
+    global_step = ckpt.get("global_step")
+    samples_seen = ckpt.get("samples_seen")
+    val_loss = ckpt.get("best_val_loss", ckpt.get("val_loss"))
+    num_emotions = ckpt.get("num_emotions")
+    num_genders = ckpt.get("num_genders")
+    num_ages = ckpt.get("num_ages")
+    unfrozen_layers = ckpt.get("unfrozen_layers")
+
+    stage = "stage-2 finetune" if "finetune" in ckpt_path.parts else "stage-1 training"
+    print(f"Training details ({stage}):", flush=True)
+    print(f"  checkpoint: {ckpt_path}", flush=True)
+    if trained_epochs is not None:
+        print(f"  trained_epochs: {trained_epochs}", flush=True)
+    if global_step is not None:
+        print(f"  global_steps: {global_step}", flush=True)
+    if samples_seen is not None:
+        print(f"  samples_seen: {samples_seen}", flush=True)
+    if val_loss is not None:
+        print(f"  val_loss: {float(val_loss):.6f}", flush=True)
+    if num_emotions is not None and num_genders is not None and num_ages is not None:
+        print(
+            f"  classes: emotions={num_emotions}, gender={num_genders}, age={num_ages}",
+            flush=True,
+        )
+    if unfrozen_layers:
+        print(f"  unfrozen_layers: {sorted(unfrozen_layers)}", flush=True)
+
+    span = _estimate_training_span_from_files(ckpt_path)
+    if span is not None:
+        start_dt, end_dt = span
+        duration = end_dt - start_dt
+        print(
+            "  training_wall_time_estimate: "
+            f"{_format_duration(duration.total_seconds())} "
+            f"(from file mtimes: {start_dt.isoformat(timespec='seconds')} -> "
+            f"{end_dt.isoformat(timespec='seconds')})",
+            flush=True,
+        )
+    else:
+        print("  training_wall_time_estimate: unavailable", flush=True)
 
 
 class KazEmoEmotionDataset(Dataset):
@@ -149,6 +244,7 @@ def main():
     print(f"Device: {device}", flush=True)
 
     ckpt_path = Path(args.checkpoint) if args.checkpoint else resolve_checkpoint()
+    print_training_details(ckpt_path)
     (model, emotion_encoder, _, _, id2emotion, _, _, processor) = load_model(ckpt_path, device)
     print(f"Checkpoint: {ckpt_path}", flush=True)
 

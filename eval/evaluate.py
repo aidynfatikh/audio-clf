@@ -7,6 +7,9 @@ Outputs written to ``results/`` (repo root):
   eval_results.json        — per-checkpoint accuracy + per-class breakdown
   accuracy_bars.png        — per-class accuracy bar charts for each checkpoint
 
+Console: prints a training summary (epoch counts from metrics JSON, checkpoint
+step/sample counters, and hyperparameters from multihead/train.py & finetune.py).
+
 Checkpoints evaluated (prefers finetune files, falls back to stage-1):
   1. best_model_finetuned.pt  / best_model.pt
   2. latest_checkpoint_finetune.pt / latest_checkpoint.pt
@@ -55,6 +58,140 @@ FT_METRICS   = FINETUNE_DIR   / "training_metrics_finetune.json"
 TASK_COLOUR  = {"emotion": "#E05C5C", "gender": "#5C9BE0", "age": "#5CBF7A"}
 PHASE_COLOUR = {"stage1": "#4C72B0",  "finetune": "#DD8452"}
 TASKS        = ("emotion", "gender", "age")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training duration & hyperparameter summary (metrics + checkpoint metadata)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _peek_checkpoint_meta(path: Path) -> dict:
+    """Load scalar fields from a checkpoint without requiring a full model load."""
+    if not path.exists():
+        return {}
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+    out = {}
+    for k in ("epoch", "global_step", "samples_seen", "val_loss", "best_val_loss"):
+        if k in ckpt:
+            out[k] = ckpt[k]
+    return out
+
+
+def _import_training_hyperparams() -> tuple[dict | None, dict | None]:
+    """Defaults from multihead/train.py and multihead/finetune.py (same run as evaluation)."""
+    s1, ft = None, None
+    try:
+        from multihead import train as train_mod
+
+        s1 = {
+            "batch_size": train_mod.BATCH_SIZE,
+            "num_epochs_configured": train_mod.NUM_EPOCHS,
+            "head_learning_rate": train_mod.HEAD_LEARNING_RATE,
+            "emotion_weight": train_mod.EMOTION_WEIGHT,
+            "gender_weight": train_mod.GENDER_WEIGHT,
+            "age_weight": train_mod.AGE_WEIGHT,
+            "grad_clip_norm": train_mod.GRAD_CLIP_NORM,
+            "early_stopping_patience": train_mod.EARLY_STOPPING_PATIENCE,
+        }
+    except Exception:
+        pass
+    try:
+        from multihead import finetune as ft_mod
+
+        ft = {
+            "batch_size": ft_mod.BATCH_SIZE,
+            "num_epochs_configured": ft_mod.NUM_EPOCHS,
+            "backbone_lr_top": ft_mod.BACKBONE_LR_TOP,
+            "layer_decay": ft_mod.LAYER_DECAY,
+            "head_lr": ft_mod.HEAD_LR,
+            "unfreeze_top_n": ft_mod.UNFREEZE_TOP_N,
+            "unfreeze_feature_proj": ft_mod.UNFREEZE_FEATURE_PROJ,
+            "emotion_weight": ft_mod.EMOTION_WEIGHT,
+            "gender_weight": ft_mod.GENDER_WEIGHT,
+            "age_weight": ft_mod.AGE_WEIGHT,
+            "grad_clip_norm": ft_mod.GRAD_CLIP_NORM,
+            "early_stopping_patience": ft_mod.EARLY_STOPPING_PATIENCE,
+        }
+    except Exception:
+        pass
+    return s1, ft
+
+
+def print_training_summary(
+    s1_metrics: list[dict],
+    ft_metrics: list[dict],
+    checkpoints: list[tuple[str, Path]],
+) -> None:
+    """Print epoch-level training extent, checkpoint counters, and script hyperparameters."""
+    sep = "═" * 64
+    print(f"\n{sep}")
+    print("  TRAINING SUMMARY (extent & configuration)")
+    print(sep)
+
+    n_s1 = len(s1_metrics)
+    n_ft = len(ft_metrics)
+    last_s1_ep = s1_metrics[-1]["epoch"] if s1_metrics else None
+    last_ft_ep = ft_metrics[-1]["epoch"] if ft_metrics else None
+
+    print("\n  Extent (from saved epoch metrics — each row is one completed epoch):")
+    if n_s1:
+        print(f"    Stage-1 : {n_s1} epoch(s) logged  (last epoch number: {last_s1_ep})")
+    else:
+        print("    Stage-1 : no training_metrics.json (or empty)")
+    if n_ft:
+        print(f"    Finetune: {n_ft} epoch(s) logged  (last epoch number: {last_ft_ep})")
+    else:
+        print("    Finetune: no training_metrics_finetune.json (or empty)")
+
+    total_epochs_logged = n_s1 + n_ft
+    if total_epochs_logged:
+        print(f"    Total   : {total_epochs_logged} logged epoch row(s) (stage-1 + finetune).")
+    print(
+        "\n  Wall-clock time was not written to metrics files; use the epoch counts above "
+        "or W&B logs if enabled during training."
+    )
+
+    hp_s1, hp_ft = _import_training_hyperparams()
+    if hp_s1:
+        print("\n  Stage-1 script defaults (multihead/train.py):")
+        for k, v in sorted(hp_s1.items()):
+            print(f"    {k}: {v}")
+    else:
+        print("\n  Stage-1 hyperparameters: (could not import multihead.train)")
+    if hp_ft:
+        print("\n  Finetune script defaults (multihead/finetune.py):")
+        for k, v in sorted(hp_ft.items()):
+            print(f"    {k}: {v}")
+    else:
+        print("\n  Finetune hyperparameters: (could not import multihead.finetune)")
+
+    print("\n  Checkpoints (epoch is 0-based index of last completed epoch; "
+          "global_step / samples_seen are trainer counters):")
+    for label, ckpt_path in checkpoints:
+        meta = _peek_checkpoint_meta(ckpt_path)
+        if not meta:
+            print(f"    {label}: {ckpt_path}  (could not read metadata)")
+            continue
+        ep = meta.get("epoch")
+        ep_human = f"epoch index {ep}" if ep is not None else "epoch index ?"
+        if ep is not None:
+            ep_human += f"  (~{int(ep) + 1} epoch(s) completed in that phase)"
+        extra = []
+        if meta.get("global_step") is not None:
+            extra.append(f"global_step={meta['global_step']:,}")
+        if meta.get("samples_seen") is not None:
+            extra.append(f"samples_seen={meta['samples_seen']:,}")
+        if meta.get("val_loss") is not None:
+            extra.append(f"val_loss={meta['val_loss']:.6f}")
+        if meta.get("best_val_loss") is not None:
+            extra.append(f"best_val_loss={meta['best_val_loss']:.6f}")
+        tail = "  " + "  ".join(extra) if extra else ""
+        print(f"    {label}: {ep_human}{tail}")
+        print(f"      path: {ckpt_path}")
+
+    print(f"\n{sep}\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -507,6 +644,8 @@ def main():
 
     # ── Evaluate ──────────────────────────────────────────────────────────────
     checkpoints = _candidate_checkpoints()
+    print_training_summary(s1_metrics, ft_metrics, checkpoints)
+
     evaluated   = []                   # (label, split_name, ckpt_path, res)
     all_results = defaultdict(dict)    # {label: {split: res}}
 

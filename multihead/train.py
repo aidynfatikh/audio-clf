@@ -77,6 +77,7 @@ EARLY_STOPPING_PATIENCE = 5
 CHECKPOINT_EVERY_STEPS = int(os.environ.get("CHECKPOINT_EVERY_STEPS", "0"))
 CHECKPOINT_KEEP_LAST_N_STEP_FILES = int(os.environ.get("CHECKPOINT_KEEP_LAST_N_STEP_FILES", "5"))
 CHECKPOINT_SAVE_LATEST_EVERY_STEPS = os.environ.get("CHECKPOINT_SAVE_LATEST_EVERY_STEPS", "0").strip().lower() in {"1", "true", "yes"}
+VAL_EVERY_STEPS = int(os.environ.get("VAL_EVERY_STEPS", "0"))
 
 WANDB_ENABLED = os.environ.get("WANDB_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
 WANDB_ENTITY = os.environ.get("WANDB_ENTITY", "")
@@ -204,6 +205,11 @@ def main():
     best_val_loss = float('inf')
     last_epoch = -1
     all_metrics = []
+    all_step_val_metrics: list[dict] = []
+    step_val_metrics_path = MODEL_DIR / "step_val_metrics.json"
+    if step_val_metrics_path.exists():
+        with open(step_val_metrics_path) as f:
+            all_step_val_metrics = json.load(f)
     start_epoch = 0
     epochs_without_improvement = 0
     step_state = {'global_step': 0, 'samples_seen': 0}
@@ -249,6 +255,7 @@ def main():
                     'early_stopping_patience': EARLY_STOPPING_PATIENCE,
                     'use_kazemo': USE_KAZEMO,
                     'checkpoint_every_steps': CHECKPOINT_EVERY_STEPS,
+                    'val_every_steps': VAL_EVERY_STEPS,
                 },
                 'tags': WANDB_TAGS,
                 'resume': 'allow',
@@ -325,6 +332,39 @@ def main():
                     name="stage1-latest",
                     artifact_type='checkpoint',
                 )
+
+        if VAL_EVERY_STEPS > 0 and global_step % VAL_EVERY_STEPS == 0:
+            step_val = validate(
+                model, val_loader, criterion_emotion, criterion_gender,
+                criterion_age, DEVICE,
+                emotion_weight=EMOTION_WEIGHT,
+                gender_weight=GENDER_WEIGHT,
+                age_weight=AGE_WEIGHT,
+            )
+            model.train()  # validate() leaves model in eval mode
+            print(
+                f"  [Step {global_step}] Val Loss: {step_val['total']:.4f}  "
+                f"Emotion Acc: {step_val['emotion_acc']:.4f}  "
+                f"Gender Acc: {step_val['gender_acc']:.4f}  "
+                f"Age Acc: {step_val['age_acc']:.4f}"
+            )
+            if wandb_run is not None:
+                wandb_run.log({
+                    'val/loss_total': float(step_val['total']),
+                    'val/loss_emotion': float(step_val['emotion']),
+                    'val/loss_gender': float(step_val['gender']),
+                    'val/loss_age': float(step_val['age']),
+                    'val/acc_emotion': float(step_val['emotion_acc']),
+                    'val/acc_gender': float(step_val['gender_acc']),
+                    'val/acc_age': float(step_val['age_acc']),
+                }, step=global_step)
+            all_step_val_metrics.append({
+                "global_step": global_step,
+                "epoch": payload['epoch'] + 1,
+                "val": {k: round(float(v), 6) for k, v in step_val.items()},
+            })
+            with open(step_val_metrics_path, "w") as f:
+                json.dump(all_step_val_metrics, f, indent=2)
 
     if DEVICE.type == 'cuda' and hasattr(torch, 'compile'):
         try:
