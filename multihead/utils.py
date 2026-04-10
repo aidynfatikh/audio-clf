@@ -47,9 +47,12 @@ KAZEMO_MAX_SAMPLES = int(os.environ.get("KAZEMO_MAX_SAMPLES", "20000"))
 KAZEMO_VAL_FRACTION = float(os.environ.get("KAZEMO_VAL_FRACTION", "0.1"))
 USE_KAZEMO = os.environ.get("USE_KAZEMO", "1").strip().lower() not in {"0", "false", "no"}
 
+BATCH_SIZE_ENV_VAR = "BATCH_SIZE"
+
 TRAIN_VAL_MANIFEST = os.environ.get("TRAIN_VAL_MANIFEST", "").strip()
 HF_BATCH01_ID = os.environ.get("HF_BATCH01_ID", "01gumano1d/batch01-validation-test")
 HF_BATCH02_ID = os.environ.get("HF_BATCH02_ID", "01gumano1d/batch2-aug-clean")
+USE_BATCH02 = os.environ.get("USE_BATCH02", "1").strip().lower() not in {"0", "false", "no"}
 HF_BATCH01_SPLIT = os.environ.get("HF_BATCH01_SPLIT", "train")
 HF_BATCH01_CACHE = Path(
     os.environ.get("HF_BATCH01_CACHE", str(REPO_ROOT / "data" / "batch01-validation-test"))
@@ -60,6 +63,23 @@ HF_BATCH02_CACHE = Path(
 
 # Safe stop: set by SIGINT handler (Ctrl+C)
 stop_requested = False
+
+
+def resolve_batch_size(default: int) -> int:
+    """Resolve batch size from global env var with validation.
+
+    Uses BATCH_SIZE when set; otherwise falls back to the provided default.
+    """
+    raw = os.environ.get(BATCH_SIZE_ENV_VAR)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{BATCH_SIZE_ENV_VAR} must be an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{BATCH_SIZE_ENV_VAR} must be > 0, got {value}")
+    return value
 
 
 def apply_cuda_perf_flags(device: torch.device | None = None) -> None:
@@ -323,20 +343,24 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
     train_idx = train_indices_excluding_holdout(split1, holdout_bases)
     train_b1 = split1.select(train_idx)
 
-    HF_BATCH02_CACHE.mkdir(parents=True, exist_ok=True)
-    print(f"[data] batch02 → train only: {HF_BATCH02_ID!r} cache={HF_BATCH02_CACHE}")
-    ds2 = load_dataset(HF_BATCH02_ID, cache_dir=str(HF_BATCH02_CACHE))
-    b2 = ds2.get("train")
-    if b2 is None:
-        b2 = ds2[list(ds2.keys())[0]]
-    b2 = _force_canonical_label_schema(_prepare_split_for_training(b2), reference_split=train_b1)
+    if USE_BATCH02:
+        HF_BATCH02_CACHE.mkdir(parents=True, exist_ok=True)
+        print(f"[data] batch02 → train only: {HF_BATCH02_ID!r} cache={HF_BATCH02_CACHE}")
+        ds2 = load_dataset(HF_BATCH02_ID, cache_dir=str(HF_BATCH02_CACHE))
+        b2 = ds2.get("train")
+        if b2 is None:
+            b2 = ds2[list(ds2.keys())[0]]
+        b2 = _force_canonical_label_schema(_prepare_split_for_training(b2), reference_split=train_b1)
+    else:
+        print("[data] USE_BATCH02=0: skipping batch02; train will use batch01 train-only.")
+        b2 = train_b1.select([])
 
     kazemo_train_count = 0
     kazemo_val_count = 0
     kazemo_emotion_counts: dict = {}
 
     holdout_val = val_split  # batch01 holdout only — saved before any Kazemo concat
-    train_split = concatenate_datasets([train_b1, b2])
+    train_split = concatenate_datasets([train_b1, b2]) if len(b2) > 0 else train_b1
     named_val_splits: dict = {}
 
     if USE_KAZEMO:
@@ -373,6 +397,7 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         "manifest": str(manifest_path),
         "batch01_id": HF_BATCH01_ID,
         "batch02_id": HF_BATCH02_ID,
+        "use_batch02": USE_BATCH02,
         "batch01_split": HF_BATCH01_SPLIT,
         "batch01_train_only": len(train_b1),
         "batch02_train_only": len(b2),

@@ -56,6 +56,7 @@ from utils.finetune_utils import print_lr_schedule as _print_lr_schedule
 from multihead.model import MultiTaskHubert
 from multihead.utils import (
     AudioDataset,
+    BATCH_SIZE_ENV_VAR,
     KAZEMO_MAX_SAMPLES,
     MODEL_DIR,
     RANDOM_SEED,
@@ -68,6 +69,7 @@ from multihead.utils import (
     filter_val_metrics,
     make_batch_end_handler,
     make_cosine_schedule,
+    resolve_batch_size,
     save_wandb_file_artifact,
     set_seed,
     sigint_handler,
@@ -76,7 +78,7 @@ from multihead.utils import (
     validate,
 )
 
-BATCH_SIZE = 8
+BATCH_SIZE = resolve_batch_size(default=8)
 NUM_EPOCHS = 20
 
 BACKBONE_LR_TOP = 5e-5
@@ -121,6 +123,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Batch size: {BATCH_SIZE} ({BATCH_SIZE_ENV_VAR} env override)")
     apply_cuda_perf_flags(device)
 
     layer_prefs = latest_layer_prefs(MODEL_DIR)

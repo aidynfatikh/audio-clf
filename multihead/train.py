@@ -42,6 +42,7 @@ import multihead.utils as utils
 from multihead.model import MultiTaskHubert
 from multihead.utils import (
     AudioDataset,
+    BATCH_SIZE_ENV_VAR,
     KAZEMO_MAX_SAMPLES,
     MODEL_DIR,
     RANDOM_SEED,
@@ -58,6 +59,7 @@ from multihead.utils import (
     rotate_step_checkpoints,
     save_step_checkpoint,
     save_wandb_file_artifact,
+    resolve_batch_size,
     set_seed,
     sigint_handler,
     train_epoch,
@@ -66,7 +68,7 @@ from multihead.utils import (
 )
 
 # ── Stage-1 configuration ───────────────────────────────────────────────────
-BATCH_SIZE = 4
+BATCH_SIZE = resolve_batch_size(default=4)
 HEAD_LEARNING_RATE = 1e-3
 NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -100,6 +102,7 @@ def main():
     set_seed(RANDOM_SEED)
     signal.signal(signal.SIGINT, sigint_handler)
     print(f"Using device: {DEVICE}")
+    print(f"Batch size: {BATCH_SIZE} ({BATCH_SIZE_ENV_VAR} env override)")
     print("Press Ctrl+C to stop training and save a checkpoint.")
 
     _dataset, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
