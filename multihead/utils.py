@@ -53,6 +53,7 @@ TRAIN_VAL_MANIFEST = os.environ.get("TRAIN_VAL_MANIFEST", "").strip()
 HF_BATCH01_ID = os.environ.get("HF_BATCH01_ID", "01gumano1d/batch01-validation-test")
 HF_BATCH02_ID = os.environ.get("HF_BATCH02_ID", "01gumano1d/batch2-aug-clean")
 USE_BATCH02 = os.environ.get("USE_BATCH02", "1").strip().lower() not in {"0", "false", "no"}
+USE_BATCH01_TRAIN = os.environ.get("USE_BATCH01_TRAIN", "1").strip().lower() not in {"0", "false", "no"}
 HF_BATCH01_SPLIT = os.environ.get("HF_BATCH01_SPLIT", "train")
 HF_BATCH01_CACHE = Path(
     os.environ.get("HF_BATCH01_CACHE", str(REPO_ROOT / "data" / "batch01-validation-test"))
@@ -343,6 +344,10 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
     train_idx = train_indices_excluding_holdout(split1, holdout_bases)
     train_b1 = split1.select(train_idx)
 
+    if not USE_BATCH01_TRAIN:
+        print("[data] USE_BATCH01_TRAIN=0: excluding batch01 from train (batch02-only mode).")
+        train_b1 = split1.select([])  # empty — keeps schema for downstream casts
+
     if USE_BATCH02:
         HF_BATCH02_CACHE.mkdir(parents=True, exist_ok=True)
         print(f"[data] batch02 → train only: {HF_BATCH02_ID!r} cache={HF_BATCH02_CACHE}")
@@ -398,6 +403,7 @@ def build_holdout_mixed_train_val_splits(manifest_path: Path):
         "batch01_id": HF_BATCH01_ID,
         "batch02_id": HF_BATCH02_ID,
         "use_batch02": USE_BATCH02,
+        "use_batch01_train": USE_BATCH01_TRAIN,
         "batch01_split": HF_BATCH01_SPLIT,
         "batch01_train_only": len(train_b1),
         "batch02_train_only": len(b2),
