@@ -1,12 +1,52 @@
-torch>=2.0.0
-transformers>=4.30.0
-datasets>=2.14.0
-huggingface-hub>=0.16.0
-soundfile>=0.12.0
-librosa>=0.10.0
-python-dotenv>=1.0.0
-tqdm>=4.65.0
-numpy>=1.24.0
-gradio>=4.0.0
-elevenlabs>=1.0.0
-wandb>=0.17.0
+# Python 3.10+ expected.
+#
+# CUDA note
+# ─────────
+# `pip install torch` from PyPI ships with CUDA 12.x wheels by default. If your
+# system CUDA toolkit is different, install torch FIRST from the matching
+# PyTorch index, then run `pip install -r requirements.txt` (which will leave
+# the already-installed torch alone):
+#
+#   # CUDA 13.0
+#   pip install --index-url https://download.pytorch.org/whl/cu130 torch
+#
+#   # CUDA 12.8
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch
+#
+#   # CUDA 11.8
+#   pip install --index-url https://download.pytorch.org/whl/cu118 torch
+#
+#   pip install -r requirements.txt
+#
+# CUDA 13 wheels require torch ≥ 2.8. Lower bounds below reflect the oldest
+# version actually exercised by the code; upper bounds are intentionally left
+# open so pip resolves the latest stable.
+
+# ── Deep learning ───────────────────────────────────────────────────────────
+torch>=2.6
+transformers>=4.40
+huggingface-hub>=0.24
+
+# ── Data pipeline & split builder ───────────────────────────────────────────
+datasets>=2.18
+pyarrow>=15
+scikit-learn>=1.4
+pyyaml>=6
+
+# ── Audio I/O & features ────────────────────────────────────────────────────
+soundfile>=0.12
+librosa>=0.10
+
+# ── Numerics ────────────────────────────────────────────────────────────────
+numpy>=1.26
+
+# ── Experiment tracking & config ────────────────────────────────────────────
+wandb>=0.17
+python-dotenv>=1.0
+tqdm>=4.66
+
+# ── Eval plots (only required for eval/evaluate.py visualisations) ──────────
+matplotlib>=3.8
+
+# ── Gradio demo (only required for eval/demo.py) ────────────────────────────
+gradio>=4.40
