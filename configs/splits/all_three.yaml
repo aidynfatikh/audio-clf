@@ -1,0 +1,41 @@
+name: b1_b2_kazemo_v1
+seed: 42
+speaker_disjoint: true
+stratify_by: emotion
+output_dir: splits
+
+corpora:
+  batch01:
+    mode: split
+    hf_id: 01gumano1d/batch01-validation-test
+    hf_split: train
+    cache_dir: data/batch01-validation-test
+    ratios: {train: 0.70, val: 0.15, test: 0.15}
+    filter_augmented: true
+    speaker_column: speaker_id
+
+  batch02:
+    mode: split
+    hf_id: 01gumano1d/batch2-aug-clean
+    hf_split: train
+    cache_dir: data/batch2-aug-clean
+    ratios: {train: 0.90, val: 0.05, test: 0.05}
+    filter_augmented: true
+    speaker_column: speaker_id
+
+  kazemo:
+    mode: split
+    cache_dir: data/kazemo
+    max_samples: null
+    max_per_speaker: null
+    speaker_selection:
+      strategy: by_index
+      train_indices: [0, 1]
+      valtest_index: 2
+    valtest_ratio: {val: 0.5, test: 0.5}
+
+checks:
+  fail_on_speaker_overlap: true
+  fail_on_row_overlap: true
+  max_ratio_drift_pp: 5
+  min_samples_per_emotion_per_split: 5

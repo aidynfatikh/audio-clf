@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from multihead.model import MultiTaskHubert
-from multihead.utils import unwrap
+from utils.misc import unwrap
 
 # HuBERT has 13 hidden states: index 0 = feature-projection output,
 # indices 1-12 = transformer encoder layers [0..11].

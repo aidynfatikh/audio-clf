@@ -38,32 +38,44 @@ try:
 except Exception:
     wandb = None
 
-import multihead.utils as utils
 from multihead.model import MultiTaskHubert
-from multihead.utils import (
-    AudioDataset,
-    BATCH_SIZE_ENV_VAR,
-    KAZEMO_MAX_SAMPLES,
+from utils.checkpointing import (
     MODEL_DIR,
-    RANDOM_SEED,
-    SAMPLE_RATE,
-    USE_KAZEMO,
-    _ALL_TASKS,
-    _wandb_val_keys,
-    apply_cuda_perf_flags,
-    build_label_encoders,
-    build_mixed_train_val_splits,
-    filter_val_metrics,
-    make_batch_end_handler,
     make_cosine_schedule,
     rotate_step_checkpoints,
     save_step_checkpoint,
     save_wandb_file_artifact,
+)
+from utils.data import AudioDataset, VAL_FRACTION, build_label_encoders, fallback_split_train_val
+from utils.data_loading import (
+    HF_BATCH01_CACHE,
+    HF_BATCH01_ID,
+    HF_BATCH01_SPLIT,
+    HF_BATCH02_CACHE,
+    HF_BATCH02_ID,
+    KAZEMO_MAX_SAMPLES,
+    TRAIN_VAL_MANIFEST,
+    USE_KAZEMO,
+    build_holdout_mixed_train_val_splits,
+    build_mixed_train_val_splits,
+)
+from utils.misc import (
+    BATCH_SIZE_ENV_VAR,
+    RANDOM_SEED,
+    REPO_ROOT,
+    SAMPLE_RATE,
+    _ALL_TASKS,
+    apply_cuda_perf_flags,
     resolve_batch_size,
     set_seed,
     sigint_handler,
-    train_epoch,
     unwrap,
+)
+from utils.training import (
+    _wandb_val_keys,
+    filter_val_metrics,
+    make_batch_end_handler,
+    train_epoch,
     validate,
 )
 
@@ -478,23 +490,13 @@ def main():
         wandb_run.finish()
 
 
-# ── Backward-compatible aliases (prefer `from model` / `utils` in new code) ─
+# ── Backward-compatible aliases ─────────────────────────────────────────────
 _make_cosine_schedule = make_cosine_schedule
 _unwrap = unwrap
 _sigint_handler = sigint_handler
 _save_wandb_file_artifact = save_wandb_file_artifact
 _save_step_checkpoint = save_step_checkpoint
 _rotate_step_checkpoints = rotate_step_checkpoints
-VAL_FRACTION = utils.VAL_FRACTION
-REPO_ROOT = utils.REPO_ROOT
-TRAIN_VAL_MANIFEST = utils.TRAIN_VAL_MANIFEST
-HF_BATCH01_ID = utils.HF_BATCH01_ID
-HF_BATCH02_ID = utils.HF_BATCH02_ID
-HF_BATCH01_SPLIT = utils.HF_BATCH01_SPLIT
-HF_BATCH01_CACHE = utils.HF_BATCH01_CACHE
-HF_BATCH02_CACHE = utils.HF_BATCH02_CACHE
-fallback_split_train_val = utils.fallback_split_train_val
-build_holdout_mixed_train_val_splits = utils.build_holdout_mixed_train_val_splits
 
 if __name__ == "__main__":
     try:

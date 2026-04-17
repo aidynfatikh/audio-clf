@@ -14,9 +14,8 @@ from datasets import load_dataset
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOTENV = REPO_ROOT / ".env"
-#DATASET_ID = "01gumano1d/batch01-validation-test"
 DATASET_ID = "01gumano1d/batch2-aug-clean"
-DATA_DIR = REPO_ROOT / "data" / "batch01-aug"
+DATA_DIR = REPO_ROOT / "data" / "kazemo"
 
 load_dotenv(DOTENV)
 HF_TOKEN = os.environ.get("HF_TOKEN")
