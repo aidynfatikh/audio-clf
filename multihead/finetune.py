@@ -104,9 +104,11 @@ UNFREEZE_FEATURE_PROJ = False
 ANALYZE_ONLY = "--analyze" in sys.argv
 EARLY_STOPPING_PATIENCE = 5
 
+NUM_CHECKPOINTS = int(os.environ.get("NUM_CHECKPOINTS", "5"))
 CHECKPOINT_EVERY_STEPS = int(os.environ.get("CHECKPOINT_EVERY_STEPS", "0"))
-CHECKPOINT_KEEP_LAST_N_STEP_FILES = int(os.environ.get("CHECKPOINT_KEEP_LAST_N_STEP_FILES", "5"))
+CHECKPOINT_KEEP_LAST_N_STEP_FILES = int(os.environ.get("CHECKPOINT_KEEP_LAST_N_STEP_FILES", str(NUM_CHECKPOINTS)))
 CHECKPOINT_SAVE_LATEST_EVERY_STEPS = os.environ.get("CHECKPOINT_SAVE_LATEST_EVERY_STEPS", "0").strip().lower() in {"1", "true", "yes"}
+NUM_VALIDATIONS = int(os.environ.get("NUM_VALIDATIONS", "5"))
 VAL_EVERY_STEPS = int(os.environ.get("VAL_EVERY_STEPS", "0"))
 
 WANDB_ENABLED = os.environ.get("WANDB_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
@@ -350,6 +352,16 @@ def main() -> None:
     criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
     criterion_age = nn.CrossEntropyLoss(label_smoothing=0.1)
 
+    _total_steps = max(1, (NUM_EPOCHS - start_epoch) * len(train_loader))
+    _ckpt_every = CHECKPOINT_EVERY_STEPS
+    if _ckpt_every == 0 and NUM_CHECKPOINTS > 0:
+        _ckpt_every = max(1, _total_steps // NUM_CHECKPOINTS)
+        print(f"  Checkpointing: {NUM_CHECKPOINTS} evenly-spaced (every {_ckpt_every} steps of {_total_steps})")
+    _val_every = VAL_EVERY_STEPS
+    if _val_every == 0 and NUM_VALIDATIONS > 0:
+        _val_every = max(1, _total_steps // NUM_VALIDATIONS)
+        print(f"  Step validations: {NUM_VALIDATIONS} evenly-spaced (every {_val_every} steps)")
+
     _on_train_batch_end = make_batch_end_handler(
         step_state=step_state,
         train_state=train_state,
@@ -360,13 +372,13 @@ def main() -> None:
         num_emotions=num_emotions,
         num_genders=num_genders,
         num_ages=num_ages,
-        checkpoint_every_steps=CHECKPOINT_EVERY_STEPS,
+        checkpoint_every_steps=_ckpt_every,
         checkpoint_keep_last_n=CHECKPOINT_KEEP_LAST_N_STEP_FILES,
         checkpoint_save_latest_every_steps=CHECKPOINT_SAVE_LATEST_EVERY_STEPS,
         step_ckpt_dir=step_ckpt_dir,
         latest_path=latest_ft_path,
         step_val_metrics_path=step_val_metrics_path,
-        val_every_steps=VAL_EVERY_STEPS,
+        val_every_steps=_val_every,
         val_loaders=val_loaders,
         val_tasks=named_val_tasks,
         criterion_emotion=criterion_emotion,
