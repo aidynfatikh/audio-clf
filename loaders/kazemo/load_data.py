@@ -10,8 +10,7 @@ from typing import Any
 os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 os.environ["TORCHCODEC_QUIET"] = "1"
 
-from datasets import Audio, DatasetDict, load_dataset
-from datasets.exceptions import DatasetGenerationError
+from datasets import Audio, DatasetDict
 
 
 DATASET_ID = "issai/KazEmoTTS"
@@ -183,29 +182,15 @@ def _load_from_zip_fallback(cache_dir: str | None, max_samples: int | None) -> D
 
 
 def load_kazemotts(cache_dir: str | None = None, max_samples: int | None = None) -> DatasetDict:
-    # The HF hub repo currently points to a binary `.zip` but is sometimes loaded
-    # with the generic `text` builder, which tries to UTF-8 decode that zip.
-    # We try the default loader and one permissive config; if it still fails,
-    # we fall back to downloading/extracting the zip and enumerating audio files.
+    # The HF hub repo for `issai/KazEmoTTS` is a plain binary `.zip` with no
+    # audiofolder/parquet config. HF's auto-detection routes it through the
+    # generic `text` builder, which either crashes with UnicodeDecodeError or
+    # (with encoding_errors="replace") silently produces hundreds of thousands
+    # of bogus "text" rows from the zip bytes. Neither is usable.
     #
-    # Important: if max_samples is set, we skip the `load_dataset` path entirely
-    # to avoid building a huge (and sometimes broken) intermediate "text" split,
-    # while enforcing balanced per-emotion sampling via zip fallback.
-    if max_samples is not None and max_samples > 0:
-        ds = _load_from_zip_fallback(cache_dir, max_samples)
-    else:
-        try:
-            ds = load_dataset(DATASET_ID, cache_dir=cache_dir)
-        except (UnicodeDecodeError, DatasetGenerationError, TypeError, ValueError):
-            try:
-                ds = load_dataset(
-                    DATASET_ID,
-                    cache_dir=cache_dir,
-                    encoding="utf-8",
-                    encoding_errors="replace",
-                )
-            except (UnicodeDecodeError, DatasetGenerationError, TypeError, ValueError):
-                ds = _load_from_zip_fallback(cache_dir, max_samples)
+    # The only correct path is to snapshot-download the repo and enumerate the
+    # zip's audio members directly. `max_samples=None` means "take all".
+    ds = _load_from_zip_fallback(cache_dir, max_samples)
 
     def _add_emotion(example: dict[str, Any]) -> dict[str, Any]:
         if isinstance(example.get("emotion"), str) and example.get("emotion"):

@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 os.environ.setdefault("DATASETS_AUDIO_BACKEND", "soundfile")
 
-from datasets import load_dataset  # noqa: E402
+from loaders.kazemo.load_data import load_kazemotts  # noqa: E402
 
 
 CACHE_DIR = REPO_ROOT / "data" / "kazemo"
@@ -26,7 +26,9 @@ CACHE_DIR = REPO_ROOT / "data" / "kazemo"
 
 def main() -> None:
     print(f"[inspect] cache_dir = {CACHE_DIR}")
-    ds = load_dataset("issai/KazEmoTTS", cache_dir=str(CACHE_DIR))
+    # Use the real loader so we exercise the zip-fallback path the builder
+    # relies on. max_samples=None → enumerate every audio file in the zip.
+    ds = load_kazemotts(cache_dir=str(CACHE_DIR), max_samples=None)
 
     print("\n── splits & sizes ─────────────────────────────────────────────")
     for split_name, split in ds.items():
