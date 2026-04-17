@@ -43,6 +43,7 @@ try:
 except Exception:
     wandb = None
 
+import utils.misc as _utils_misc
 from multihead.model import MultiTaskHubert
 from utils.checkpointing import (
     MODEL_DIR,
@@ -380,7 +381,7 @@ def main() -> None:
     print(f"\nStarting fine-tuning for {NUM_EPOCHS} epochs. Press Ctrl+C to stop and save.")
 
     for epoch in range(start_epoch, NUM_EPOCHS):
-        if utils.stop_requested:
+        if _utils_misc.stop_requested:
             break
 
         print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
@@ -442,7 +443,7 @@ def main() -> None:
             print(_acc_line)
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
-        if utils.stop_requested:
+        if _utils_misc.stop_requested:
             break
 
         val_metrics = all_val_metrics[_primary_val]  # primary split drives early stopping / best model
@@ -519,7 +520,7 @@ def main() -> None:
                 artifact_type='checkpoint',
             )
 
-    if utils.stop_requested:
+    if _utils_misc.stop_requested:
         int_path = FINETUNE_DIR / "checkpoint_finetune_interrupted.pt"
         torch.save({
             "epoch": last_epoch,

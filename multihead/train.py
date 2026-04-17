@@ -38,6 +38,7 @@ try:
 except Exception:
     wandb = None
 
+import utils.misc as _utils_misc
 from multihead.model import MultiTaskHubert
 from utils.checkpointing import (
     MODEL_DIR,
@@ -331,7 +332,7 @@ def main():
             print(f"  torch.compile unavailable ({e}), running eager.")
 
     for epoch in range(start_epoch, NUM_EPOCHS):
-        if utils.stop_requested:
+        if _utils_misc.stop_requested:
             break
         print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
         print("-" * 50)
@@ -393,7 +394,7 @@ def main():
             print(_acc_line)
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
-        if utils.stop_requested:
+        if _utils_misc.stop_requested:
             break
 
         val_metrics = all_val_metrics[_primary_val]  # primary split drives early stopping / best model
@@ -470,7 +471,7 @@ def main():
                 artifact_type='checkpoint',
             )
 
-    if utils.stop_requested:
+    if _utils_misc.stop_requested:
         checkpoint_path = MODEL_DIR / "checkpoint_interrupted.pt"
         torch.save({
             'epoch': last_epoch,

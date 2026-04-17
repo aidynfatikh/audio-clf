@@ -13,7 +13,8 @@ from utils.checkpointing import (
     save_step_checkpoint,
     save_wandb_file_artifact,
 )
-from utils.misc import _ALL_TASKS, stop_requested, unwrap
+import utils.misc as _misc
+from utils.misc import _ALL_TASKS, unwrap
 
 try:
     import wandb
@@ -71,7 +72,6 @@ def train_epoch(
     grad_clip_norm: float = 1.0,
 ):
     """Train for one epoch. Returns (metrics_dict, was_stopped)."""
-    global stop_requested
     model.train()
     total_loss = emotion_loss_sum = gender_loss_sum = age_loss_sum = 0.0
     emotion_loss_batches = gender_loss_batches = age_loss_batches = num_batches = 0
@@ -82,7 +82,7 @@ def train_epoch(
     amp_dtype = torch.bfloat16 if _use_bf16 else torch.float32
 
     for batch in tqdm(dataloader, desc="Training"):
-        if stop_requested:
+        if _misc.stop_requested:
             break
         input_values = batch["input_values"].to(device, non_blocking=True)
         attention_mask = batch.get("attention_mask")
@@ -174,7 +174,7 @@ def train_epoch(
         "emotion_acc": emotion_correct / max(emotion_samples, 1),
         "gender_acc": gender_correct / max(gender_samples, 1),
         "age_acc": age_correct / max(age_samples, 1),
-    }, stop_requested
+    }, _misc.stop_requested
 
 
 def validate(
@@ -189,7 +189,6 @@ def validate(
     gender_weight: float = 0.5,
     age_weight: float = 1.0,
 ):
-    global stop_requested
     model.eval()
     total_loss = emotion_loss_sum = gender_loss_sum = age_loss_sum = 0.0
     emotion_loss_batches = gender_loss_batches = age_loss_batches = num_batches = 0
@@ -201,7 +200,7 @@ def validate(
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validating"):
-            if stop_requested:
+            if _misc.stop_requested:
                 break
             input_values = batch["input_values"].to(device, non_blocking=True)
             attention_mask = batch.get("attention_mask")
