@@ -11,7 +11,7 @@ corpora:
     hf_split: train
     cache_dir: data/batch01-validation-test
     ratios: {train: 0.70, val: 0.15, test: 0.15}
-    filter_augmented: true
+    augmented_policy: train_only   # drop_all | keep_all | train_only
     speaker_column: speaker_id
 
   batch02:

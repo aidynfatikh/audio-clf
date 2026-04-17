@@ -86,8 +86,8 @@ NUM_EPOCHS = 10
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 apply_cuda_perf_flags(DEVICE)
 
-EMOTION_WEIGHT = 1.2
-GENDER_WEIGHT = 0.5
+EMOTION_WEIGHT = 1.0
+GENDER_WEIGHT = 1.0
 AGE_WEIGHT = 1.0
 GRAD_CLIP_NORM = 1.0
 EARLY_STOPPING_PATIENCE = 5

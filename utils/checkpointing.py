@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import torch
@@ -16,7 +17,11 @@ try:
 except Exception:
     wandb = None
 
-MODEL_DIR = REPO_ROOT / "models"
+# MODEL_DIR is where all per-run outputs land (checkpoints, metrics,
+# label encoders, step/latest/best). Override via env var to keep
+# experiments separate: `MODEL_DIR=results/exp_batch01 python multihead/train.py`.
+_MODEL_DIR_ENV = os.environ.get("MODEL_DIR", "").strip()
+MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else REPO_ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 

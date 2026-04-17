@@ -57,8 +57,15 @@ def _load_hf_corpus(
     hf_split: str,
     cache_dir: Path,
     speaker_column: str | None,
-    filter_augmented: bool,
+    drop_augmented: bool,
 ) -> list[NormalizedRow]:
+    """Load a HF corpus → list[NormalizedRow].
+
+    `drop_augmented=True` removes aug rows at load time (equivalent to the old
+    `filter_augmented: true` / new `augmented_policy: drop_all`). For any other
+    policy we return every row with the `augmented` flag populated; the
+    builder decides per-split routing.
+    """
     split = _load_hf_metadata_split(hf_id, hf_split, cache_dir)
     columns = set(split.column_names)
     has_augmented_col = "augmented" in columns or "is_augmented" in columns or "metadata" in columns
@@ -69,10 +76,16 @@ def _load_hf_corpus(
     meta_split = split.remove_columns(drop_audio) if drop_audio else split
 
     rows: list[NormalizedRow] = []
+    aug_true = 0
+    aug_false = 0
     dropped_aug = 0
     for idx, row in enumerate(tqdm(meta_split, desc=f"scan {dataset_name}", leave=False)):
         aug = extract_augmented_flag(row) if has_augmented_col else None
-        if filter_augmented and aug is True:
+        if aug is True:
+            aug_true += 1
+        elif aug is False:
+            aug_false += 1
+        if drop_augmented and aug is True:
             dropped_aug += 1
             continue
         rows.append(
@@ -88,10 +101,32 @@ def _load_hf_corpus(
             )
         )
     print(
-        f"[sources] {dataset_name}: kept {len(rows)} rows, dropped {dropped_aug} augmented, "
+        f"[sources] {dataset_name}: kept {len(rows)} rows "
+        f"(aug_true={aug_true}, aug_false={aug_false}, dropped_at_source={dropped_aug}); "
         f"speaker_column_present={has_speaker}, augmented_col_present={has_augmented_col}"
     )
     return rows
+
+
+def _should_drop_at_source(cfg: dict[str, Any]) -> bool:
+    """Only the `drop_all` policy filters at load time; everything else keeps
+    augmented rows so the builder can route them per split.
+    """
+    policy = _resolve_aug_policy(cfg)
+    return policy == "drop_all"
+
+
+def _resolve_aug_policy(cfg: dict[str, Any]) -> str:
+    """Read `augmented_policy` with back-compat for legacy `filter_augmented`."""
+    raw = cfg.get("augmented_policy")
+    if raw:
+        p = str(raw).strip().lower()
+        if p not in {"drop_all", "keep_all", "train_only"}:
+            raise ValueError(f"augmented_policy must be drop_all | keep_all | train_only, got {raw!r}")
+        return p
+    if "filter_augmented" in cfg:
+        return "drop_all" if bool(cfg["filter_augmented"]) else "keep_all"
+    return "train_only"  # sensible default: keep aug in train, clean eval
 
 
 def load_batch01(cfg: dict[str, Any]) -> list[NormalizedRow]:
@@ -101,7 +136,7 @@ def load_batch01(cfg: dict[str, Any]) -> list[NormalizedRow]:
         hf_split=cfg.get("hf_split", "train"),
         cache_dir=Path(cfg["cache_dir"]),
         speaker_column=cfg.get("speaker_column", "speaker_id"),
-        filter_augmented=bool(cfg.get("filter_augmented", True)),
+        drop_augmented=_should_drop_at_source(cfg),
     )
 
 
@@ -112,7 +147,7 @@ def load_batch02(cfg: dict[str, Any]) -> list[NormalizedRow]:
         hf_split=cfg.get("hf_split", "train"),
         cache_dir=Path(cfg["cache_dir"]),
         speaker_column=cfg.get("speaker_column", "speaker_id"),
-        filter_augmented=bool(cfg.get("filter_augmented", True)),
+        drop_augmented=_should_drop_at_source(cfg),
     )
 
 

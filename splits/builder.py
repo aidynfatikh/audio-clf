@@ -23,7 +23,7 @@ from splits.schema import (
     SPLIT_TRAIN,
     SPLIT_VAL,
 )
-from splits.sources import load_corpus
+from splits.sources import _resolve_aug_policy, load_corpus
 from splits.stratified_group import stratified_grouped_three_way
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -59,15 +59,17 @@ def _assign_train_only(rows: list[NormalizedRow]) -> dict[str, list[int]]:
 
 
 def _check_speaker_disjoint(assignments: dict[str, list[NormalizedRow]]) -> list[str]:
-    """Return list of speakers that appear in more than one split."""
-    spk_to_splits: dict[str, set[str]] = {}
-    for split, rows in assignments.items():
-        for r in rows:
-            spk = r.get("speaker_id")
-            if not spk:
-                continue
-            spk_to_splits.setdefault(spk, set()).add(split)
-    return [spk for spk, splits in spk_to_splits.items() if len(splits) > 1]
+    """Return speakers leaking between train and (val ∪ test).
+
+    Val ↔ test sharing a speaker is *allowed* by design — KazEmo's rule puts
+    one speaker in both val and test because only 3 speakers exist. The real
+    leakage concern is a train speaker reappearing in an eval split.
+    """
+    train_spk = {r["speaker_id"] for r in assignments.get(SPLIT_TRAIN, []) if r.get("speaker_id")}
+    val_spk = {r["speaker_id"] for r in assignments.get(SPLIT_VAL, []) if r.get("speaker_id")}
+    test_spk = {r["speaker_id"] for r in assignments.get(SPLIT_TEST, []) if r.get("speaker_id")}
+    leaked = (train_spk & val_spk) | (train_spk & test_spk)
+    return sorted(leaked)
 
 
 def _check_row_id_disjoint(assignments: dict[str, list[NormalizedRow]]) -> list[tuple[str, str]]:
@@ -188,13 +190,64 @@ def _split_corpus(
     stratify_by = ds_cfg.get("stratify_by", global_stratify_by)
     group_field = "speaker_id" if speaker_disjoint else "row_id"
     ratios = ds_cfg.get("ratios", {SPLIT_TRAIN: 0.7, SPLIT_VAL: 0.15, SPLIT_TEST: 0.15})
-    idx = stratified_grouped_three_way(
-        rows,
+
+    policy = _resolve_aug_policy(ds_cfg)
+    if policy == "keep_all":
+        # Split every row 3-way — augmented copies can end up anywhere.
+        idx = stratified_grouped_three_way(
+            rows,
+            ratios=ratios,
+            stratify_by=stratify_by,
+            group_by_field=group_field,
+            seed=ds_cfg.get("seed", global_seed),
+        )
+        return idx, None
+
+    # drop_all / train_only — sources.py has already filtered aug rows for
+    # drop_all. For train_only, rows here contain both aug and non-aug; we
+    # split ONLY the non-aug pool and route aug rows to train afterwards.
+    non_aug_idx = [i for i, r in enumerate(rows) if r.get("augmented") is not True]
+    aug_idx = [i for i, r in enumerate(rows) if r.get("augmented") is True]
+
+    non_aug_rows = [rows[i] for i in non_aug_idx]
+    core = stratified_grouped_three_way(
+        non_aug_rows,
         ratios=ratios,
         stratify_by=stratify_by,
         group_by_field=group_field,
         seed=ds_cfg.get("seed", global_seed),
     )
+    # Map the non-aug-local indices back to original `rows` indices.
+    idx: dict[str, list[int]] = {
+        split: [non_aug_idx[j] for j in core[split]] for split in core
+    }
+
+    if policy == "train_only" and aug_idx:
+        train_spk = {
+            rows[i].get("speaker_id") for i in idx[SPLIT_TRAIN] if rows[i].get("speaker_id")
+        }
+        val_test_spk = {
+            rows[i].get("speaker_id")
+            for split in (SPLIT_VAL, SPLIT_TEST)
+            for i in idx[split]
+            if rows[i].get("speaker_id")
+        }
+        kept, leaked = 0, 0
+        for i in aug_idx:
+            spk = rows[i].get("speaker_id")
+            # Without speaker info we can't prove leakage; route aug → train anyway,
+            # relying on row-id disjointness (aug rows have distinct ids from non-aug).
+            if spk is None or spk in train_spk or spk not in val_test_spk:
+                idx[SPLIT_TRAIN].append(i)
+                kept += 1
+            else:
+                leaked += 1
+        print(
+            f"[builder] {name}: augmented_policy=train_only — "
+            f"added {kept} aug rows to train, dropped {leaked} aug rows "
+            f"whose speaker landed in val/test (leakage)"
+        )
+
     return idx, None
 
 
