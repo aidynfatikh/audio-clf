@@ -292,18 +292,24 @@ def main() -> None:
     processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
 
     print("Dataset composition:")
-    if composition.get("mode") == "holdout_manifest":
+    _mode = composition.get("mode")
+    if _mode == "split_manifest":
+        print(f"  Mode: split_manifest ({composition['manifest_dir']})")
+        print(f"  Test total: {composition.get('test_total', 0)}")
+    elif _mode == "holdout_manifest":
         print("  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
         print(f"  Manifest: {composition['manifest']}")
         print(
             f"  batch01 train-only / val holdout: {composition['batch01_train_only']} / {composition['hf_val']}"
         )
         print(f"  batch02 train-only (full split): {composition['batch02_train_only']}")
-    print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
-    print(
-        f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
-        f"{composition['kazemo_train']} / {composition['kazemo_val']}"
-    )
+    if "hf_train" in composition:
+        print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
+    if "kazemo_train" in composition:
+        print(
+            f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
+            f"{composition['kazemo_train']} / {composition['kazemo_val']}"
+        )
     if composition.get("kazemo_emotion_counts"):
         emo_counts = ", ".join([f"{k}:{v}" for k, v in composition["kazemo_emotion_counts"].items()])
         print(f"  Kazemo selected emotion counts: {emo_counts}")
