@@ -9,11 +9,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from multihead.model import MultiTaskHubert
+from multihead.model import MultiTaskBackbone
 from utils.misc import unwrap
 
-# HuBERT has 13 hidden states: index 0 = feature-projection output,
-# indices 1-12 = transformer encoder layers [0..11].
+# Defaults for hubert-base / wavlm-base-plus (both: 12 transformer layers + 1 projection
+# hidden state). Used when reading metrics files (no live model available). Live-model
+# paths (unfreeze_layers, build_optimizer) derive these from `model.backbone.config`.
 NUM_HUBERT_LAYERS = 13
 NUM_TRANSFORMER_LAYERS = 12  # encoder.layers[0] … encoder.layers[11]
 
@@ -85,7 +86,7 @@ def latest_layer_prefs(metrics_dir: Path) -> dict[str, list[float]]:
 def rank_transformer_layers(layer_prefs: dict[str, list[float]]) -> list[int]:
     """
     Rank the 12 transformer encoder layers by aggregated importance across tasks.
-    Returns encoder indices (0-based for model.hubert.encoder.layers[i]), best-first.
+    Returns encoder indices (0-based for model.backbone.encoder.layers[i]), best-first.
     """
     tasks = list(layer_prefs.keys())
     avg = []
@@ -132,37 +133,38 @@ def print_layer_analysis(layer_prefs: dict[str, list[float]], ranked: list[int])
 
 
 def unfreeze_layers(
-    model: MultiTaskHubert,
+    model: MultiTaskBackbone,
     transformer_layer_indices: list[int],
     unfreeze_feature_proj: bool = False,
 ) -> list[nn.Parameter]:
     """Unfreeze specific encoder layers (and optionally feature_projection)."""
     unfrozen_params: list[nn.Parameter] = []
+    bb_label = unwrap(model).backbone_name if hasattr(unwrap(model), "backbone_name") else "backbone"
 
     if unfreeze_feature_proj:
-        for p in model.hubert.feature_projection.parameters():
+        for p in model.backbone.feature_projection.parameters():
             p.requires_grad = True
             unfrozen_params.append(p)
-        print("  Unfrozen: hubert.feature_projection")
+        print(f"  Unfrozen: {bb_label}.feature_projection")
 
     for idx in transformer_layer_indices:
-        layer = model.hubert.encoder.layers[idx]
+        layer = model.backbone.encoder.layers[idx]
         for p in layer.parameters():
             p.requires_grad = True
             unfrozen_params.append(p)
-        print(f"  Unfrozen: hubert.encoder.layers[{idx}]")
+        print(f"  Unfrozen: {bb_label}.encoder.layers[{idx}]")
 
     return unfrozen_params
 
 
-def describe_frozen_state(model: MultiTaskHubert) -> None:
+def describe_frozen_state(model: MultiTaskBackbone) -> None:
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Trainable params: {trainable:,} / {total:,}  ({100 * trainable / total:.1f}%)")
 
 
 def build_optimizer(
-    model: MultiTaskHubert,
+    model: MultiTaskBackbone,
     layer_indices: list[int],
     backbone_lr_top: float,
     layer_decay: float,
@@ -172,10 +174,11 @@ def build_optimizer(
     param_groups: list[dict] = []
 
     m = unwrap(model)
+    n_layers = int(m.backbone.config.num_hidden_layers)
 
     for enc_idx in layer_indices:
-        lr_n = backbone_lr_top * (layer_decay ** (NUM_TRANSFORMER_LAYERS - enc_idx))
-        params = [p for p in m.hubert.encoder.layers[enc_idx].parameters() if p.requires_grad]
+        lr_n = backbone_lr_top * (layer_decay ** (n_layers - enc_idx))
+        params = [p for p in m.backbone.encoder.layers[enc_idx].parameters() if p.requires_grad]
         if params:
             param_groups.append({
                 "params": params,
@@ -183,9 +186,9 @@ def build_optimizer(
                 "name": f"encoder.layers[{enc_idx}]",
             })
 
-    fp_params = [p for p in m.hubert.feature_projection.parameters() if p.requires_grad]
+    fp_params = [p for p in m.backbone.feature_projection.parameters() if p.requires_grad]
     if fp_params:
-        lr_fp = backbone_lr_top * (layer_decay ** (NUM_TRANSFORMER_LAYERS + 1))
+        lr_fp = backbone_lr_top * (layer_decay ** (n_layers + 1))
         param_groups.append({"params": fp_params, "lr": lr_fp, "name": "feature_projection"})
 
     head_params = (
@@ -215,6 +218,3 @@ def print_lr_schedule(layer_indices: list[int], backbone_lr_top: float, layer_de
         print(f"  encoder.layers[{enc_idx:2d}]          {exp:9d}  {lr_n:10.2e}")
     print(f"  {'heads / layer-weights':<26}           -  {head_lr:10.2e}")
     print()
-
-
-_print_lr_schedule = print_lr_schedule

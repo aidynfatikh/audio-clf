@@ -47,7 +47,8 @@ from eval.validation_holdout import (
 )
 from loaders.kazemo.load_data import load_kazemotts
 from loaders.load_data import DATA_DIR, read_audio
-from multihead.model import MultiTaskHubert
+from multihead.model import MultiTaskBackbone
+from utils.config import build_feature_extractor
 from multihead.utils import SAMPLE_RATE
 
 # ── defaults ────────────────────────────────────────────────────────────────
@@ -313,15 +314,19 @@ def evaluate_model(
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     meta = _load_ckpt_meta(ckpt, ckpt_path)
 
-    model = MultiTaskHubert(
+    backbone_name = ckpt.get("backbone_name", "hubert_base")
+    pretrained = ckpt.get("pretrained", "facebook/hubert-base-ls960")
+    model = MultiTaskBackbone(
         num_emotions=ckpt["num_emotions"],
         num_genders=ckpt["num_genders"],
         num_ages=ckpt["num_ages"],
         freeze_backbone=True,
+        backbone_name=backbone_name,
+        pretrained=pretrained,
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
 
-    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+    processor = build_feature_extractor(pretrained)
 
     print(f"\n{'='*60}")
     print(f"  {ckpt_path}")

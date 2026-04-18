@@ -12,12 +12,12 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader
-from transformers import Wav2Vec2FeatureExtractor
 from datasets import Audio
 
 from loaders.load_data import load, read_audio
-from multihead.model import MultiTaskHubert
+from multihead.model import MultiTaskBackbone
 from multihead.utils import AudioDataset, MODEL_DIR, SAMPLE_RATE
+from utils.config import build_feature_extractor
 
 BATCH_SIZE = 8
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -66,16 +66,20 @@ def load_model(ckpt_path: Path | None = None, device: torch.device | None = None
     age_encoder     = encoders["age"]
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    model = MultiTaskHubert(
+    backbone_name = ckpt.get("backbone_name", "hubert_base")
+    pretrained = ckpt.get("pretrained", "facebook/hubert-base-ls960")
+    model = MultiTaskBackbone(
         num_emotions=ckpt["num_emotions"],
         num_genders=ckpt["num_genders"],
         num_ages=ckpt["num_ages"],
         freeze_backbone=True,
+        backbone_name=backbone_name,
+        pretrained=pretrained,
     )
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model = model.to(device).eval()
 
-    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+    processor = build_feature_extractor(pretrained)
 
     id2emotion = {v: k for k, v in emotion_encoder.items()}
     id2gender  = {v: k for k, v in gender_encoder.items()}

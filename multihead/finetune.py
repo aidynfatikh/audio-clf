@@ -36,7 +36,6 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from transformers import Wav2Vec2FeatureExtractor
 
 try:
     import wandb
@@ -44,7 +43,7 @@ except Exception:
     wandb = None
 
 import utils.misc as _utils_misc
-from multihead.model import MultiTaskHubert
+from multihead.model import MultiTaskBackbone
 from utils.checkpointing import (
     MODEL_DIR,
     make_cosine_schedule,
@@ -65,7 +64,7 @@ from utils.finetune_utils import (
     unfreeze_layers,
 )
 from utils.finetune_utils import print_lr_schedule as _print_lr_schedule
-from utils.config import load_stage_config
+from utils.config import build_feature_extractor, load_stage_config
 from utils.misc import (
     BATCH_SIZE_ENV_VAR,
     RANDOM_SEED,
@@ -159,7 +158,7 @@ def main() -> None:
     if UNFREEZE_FEATURE_PROJ:
         print("  Also unfreezing: feature_projection")
 
-    _dataset, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
+    _, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
     named_val_tasks: dict = composition.get("named_val_tasks", {})
     merged_for_encoders = {"train": train_split, "validation": val_split}
     print("Building label encoders...")
@@ -202,13 +201,19 @@ def main() -> None:
             print(f"WARNING: checkpoint {key}={ckpt.get(key)} but dataset has {expected}. "
                   "Label encoders may have changed.", file=sys.stderr)
 
-    model = MultiTaskHubert(
+    _backbone_name = str(_mcfg.get("name", "hubert_base"))
+    _pretrained = str(_mcfg.get("pretrained", "facebook/hubert-base-ls960"))
+    print(f"Backbone: {_backbone_name} ({_pretrained})")
+    model = MultiTaskBackbone(
         num_emotions=num_emotions,
         num_genders=num_genders,
         num_ages=num_ages,
         freeze_backbone=bool(_mcfg.get("freeze_backbone", True)),
         use_spec_augment=bool(_mcfg.get("use_spec_augment", True)),
+        backbone_name=_backbone_name,
+        pretrained=_pretrained,
     ).to(device)
+    _ckpt_extra = {"backbone_name": _backbone_name, "pretrained": _pretrained}
     model.load_state_dict(ckpt["model_state_dict"])
 
     if hasattr(model.hubert.config, 'training_drop_path'):
@@ -307,7 +312,7 @@ def main() -> None:
         except Exception as e:
             print(f"  torch.compile unavailable ({e}), running eager.")
 
-    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+    processor = build_feature_extractor(_pretrained)
 
     print("Dataset composition:")
     _mode = composition.get("mode")
@@ -414,6 +419,7 @@ def main() -> None:
         wandb_latest_artifact_every_steps=WANDB_LATEST_ARTIFACT_EVERY_STEPS,
         step_artifact_name="stage2-step",
         latest_artifact_name="stage2-latest",
+        ckpt_extra=_ckpt_extra,
     )
 
     print(f"\nStarting fine-tuning for {NUM_EPOCHS} epochs. Press Ctrl+C to stop and save.")
@@ -519,6 +525,7 @@ def main() -> None:
                 "num_genders": num_genders,
                 "num_ages": num_ages,
                 "unfrozen_layers": sorted(layers_to_unfreeze),
+                **_ckpt_extra,
             }, best_model_path)
             print(f"  ✓ New best val loss: {train_state['best_val_loss']:.4f} → saved to {best_model_path.name}")
             if wandb_run is not None and WANDB_UPLOAD_BEST_ARTIFACT:
@@ -548,6 +555,7 @@ def main() -> None:
             "num_emotions": num_emotions,
             "num_genders": num_genders,
             "num_ages": num_ages,
+            **_ckpt_extra,
         }, latest_ft_path)
         if wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT and WANDB_LATEST_ARTIFACT_EVERY_STEPS <= 0:
             save_wandb_file_artifact(

@@ -1,0 +1,38 @@
+model:
+  name: wavlm_base_plus
+  pretrained: microsoft/wavlm-base-plus
+  freeze_backbone: true
+  use_spec_augment: false
+
+training:
+  num_epochs: 10
+  head_learning_rate: 1.0e-3
+  emotion_weight: 1.0
+  gender_weight: 1.0
+  age_weight: 1.0
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+  label_smoothing: 0.1
+  weight_decay: 0.01
+  default_batch_size: 4
+  scheduler:
+    type: cosine
+    hold_epochs: 3
+    decay_epochs: 7
+
+dataloader:
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
+
+checkpointing:
+  num_checkpoints: 5
+  keep_last_n: 5
+  save_latest_every_steps: false
+
+validation:
+  num_validations: 5
+
+compile:
+  enabled: true
+  mode: default

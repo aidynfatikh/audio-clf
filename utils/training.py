@@ -306,8 +306,10 @@ def make_batch_end_handler(
     wandb_latest_artifact_every_steps: int,
     step_artifact_name: str,
     latest_artifact_name: str,
+    ckpt_extra: dict | None = None,
 ):
     """Return an on_batch_end callback. All config captured at factory-call time."""
+    ckpt_extra = ckpt_extra or {}
 
     def _handler(payload):
         global_step = payload["global_step"]
@@ -338,24 +340,27 @@ def make_batch_end_handler(
                 num_genders=num_genders,
                 num_ages=num_ages,
                 samples_seen=step_state["samples_seen"],
+                extra=ckpt_extra,
             )
             rotate_step_checkpoints(step_ckpt_dir, checkpoint_keep_last_n)
             print(f"Saved step checkpoint: {step_path.name}")
 
             if checkpoint_save_latest_every_steps:
+                latest_payload = {
+                    "epoch": payload["epoch"],
+                    "global_step": global_step,
+                    "samples_seen": step_state["samples_seen"],
+                    "model_state_dict": unwrap(model).state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "best_val_loss": train_state["best_val_loss"],
+                    "num_emotions": num_emotions,
+                    "num_genders": num_genders,
+                    "num_ages": num_ages,
+                    **ckpt_extra,
+                }
                 torch.save(
-                    {
-                        "epoch": payload["epoch"],
-                        "global_step": global_step,
-                        "samples_seen": step_state["samples_seen"],
-                        "model_state_dict": unwrap(model).state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                        "best_val_loss": train_state["best_val_loss"],
-                        "num_emotions": num_emotions,
-                        "num_genders": num_genders,
-                        "num_ages": num_ages,
-                    },
+                    latest_payload,
                     latest_path,
                 )
 

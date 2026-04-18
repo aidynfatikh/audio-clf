@@ -15,14 +15,33 @@ import yaml
 from utils.misc import REPO_ROOT, resolve_batch_size
 
 _CONFIG_DIR = REPO_ROOT / "configs" / "train"
+_DEFAULT_BACKBONE = "hubert"
 
 
 def _truthy(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes"}
 
 
-def load_stage_config(stage: int) -> dict[str, Any]:
+def resolve_backbone() -> str:
+    """Return the backbone selector (env ``BACKBONE``), default 'hubert'."""
+    return (os.environ.get("BACKBONE") or _DEFAULT_BACKBONE).strip().lower()
+
+
+def build_feature_extractor(pretrained: str):
+    """Single site to construct the input feature extractor.
+
+    HuBERT and WavLM both use ``Wav2Vec2FeatureExtractor``; centralising avoids
+    hardcoded pretrained ids scattered across train/eval scripts.
+    """
+    from transformers import Wav2Vec2FeatureExtractor
+    return Wav2Vec2FeatureExtractor.from_pretrained(pretrained)
+
+
+def load_stage_config(stage: int, backbone: str | None = None) -> dict[str, Any]:
     """Load stage YAML and attach a ``runtime`` block derived from env vars.
+
+    Config path is ``configs/train/{backbone}_stage{stage}.yaml``. ``backbone``
+    defaults to the ``BACKBONE`` env var (or 'hubert').
 
     Returns the parsed YAML dict with a ``runtime`` key added containing:
       - batch_size: resolved from BATCH_SIZE env var, else default_batch_size
@@ -30,7 +49,8 @@ def load_stage_config(stage: int) -> dict[str, Any]:
       - wandb: dict with all WANDB_* overrides
       - checkpointing overrides: CHECKPOINT_EVERY_STEPS, VAL_EVERY_STEPS, etc.
     """
-    path = _CONFIG_DIR / f"hubert_stage{stage}.yaml"
+    bb = (backbone or resolve_backbone()).lower()
+    path = _CONFIG_DIR / f"{bb}_stage{stage}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"Stage config not found: {path}")
     with open(path) as f:

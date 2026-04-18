@@ -48,25 +48,26 @@ def save_step_checkpoint(
     num_genders: int,
     num_ages: int,
     samples_seen: int,
+    extra: dict | None = None,
 ) -> Path:
     step_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = step_dir / f"checkpoint_step_{global_step:08d}.pt"
-    torch.save(
-        {
-            "epoch": epoch,
-            "global_step": global_step,
-            "samples_seen": samples_seen,
-            "source": "step",
-            "model_state_dict": unwrap(model).state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_val_loss": best_val_loss,
-            "num_emotions": num_emotions,
-            "num_genders": num_genders,
-            "num_ages": num_ages,
-        },
-        ckpt_path,
-    )
+    payload = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "samples_seen": samples_seen,
+        "source": "step",
+        "model_state_dict": unwrap(model).state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "best_val_loss": best_val_loss,
+        "num_emotions": num_emotions,
+        "num_genders": num_genders,
+        "num_ages": num_ages,
+    }
+    if extra:
+        payload.update(extra)
+    torch.save(payload, ckpt_path)
     return ckpt_path
 
 

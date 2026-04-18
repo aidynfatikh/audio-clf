@@ -31,41 +31,28 @@ import torch.nn as nn
 import torch.optim as optim
 from datasets import DatasetDict
 from torch.utils.data import DataLoader
-from transformers import Wav2Vec2FeatureExtractor
-
 try:
     import wandb
 except Exception:
     wandb = None
 
 import utils.misc as _utils_misc
-from multihead.model import MultiTaskHubert
+from multihead.model import MultiTaskBackbone
 from utils.checkpointing import (
     MODEL_DIR,
     make_cosine_schedule,
-    rotate_step_checkpoints,
-    save_step_checkpoint,
     save_wandb_file_artifact,
 )
-from utils.data import AudioDataset, VAL_FRACTION, build_label_encoders, fallback_split_train_val
+from utils.data import AudioDataset, build_label_encoders
 from utils.data_loading import (
-    HF_BATCH01_CACHE,
-    HF_BATCH01_ID,
-    HF_BATCH01_SPLIT,
-    HF_BATCH02_CACHE,
-    HF_BATCH02_ID,
     KAZEMO_MAX_SAMPLES,
-    TRAIN_VAL_MANIFEST,
     USE_KAZEMO,
-    build_holdout_mixed_train_val_splits,
     build_mixed_train_val_splits,
 )
-from utils.config import load_stage_config
+from utils.config import build_feature_extractor, load_stage_config
 from utils.misc import (
     BATCH_SIZE_ENV_VAR,
     RANDOM_SEED,
-    REPO_ROOT,
-    SAMPLE_RATE,
     _ALL_TASKS,
     apply_cuda_perf_flags,
     set_seed,
@@ -126,7 +113,7 @@ def main():
     print(f"Batch size: {BATCH_SIZE} ({BATCH_SIZE_ENV_VAR} env override)")
     print("Press Ctrl+C to stop training and save a checkpoint.")
 
-    _dataset, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
+    _, train_split, val_split, named_val_splits, composition = build_mixed_train_val_splits()
     named_val_tasks: dict = composition.get("named_val_tasks", {})
     merged_for_encoders = DatasetDict({"train": train_split, "validation": val_split})
 
@@ -149,7 +136,10 @@ def main():
         }, f, indent=2)
     print(f"Saved label encoders to {encoder_path}")
 
-    processor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/hubert-base-ls960")
+    _mcfg = CFG.get("model", {})
+    _backbone_name = str(_mcfg.get("name", "hubert_base"))
+    _pretrained = str(_mcfg.get("pretrained", "facebook/hubert-base-ls960"))
+    processor = build_feature_extractor(_pretrained)
 
     print("Dataset composition:")
     _mode = composition.get("mode")
@@ -210,14 +200,17 @@ def main():
     _primary_val = next(iter(val_loaders))
 
     print("Initializing model...")
-    _mcfg = CFG.get("model", {})
-    model = MultiTaskHubert(
+    print(f"  Backbone: {_backbone_name} ({_pretrained})")
+    model = MultiTaskBackbone(
         num_emotions=num_emotions,
         num_genders=num_genders,
         num_ages=num_ages,
         freeze_backbone=bool(_mcfg.get("freeze_backbone", True)),
         use_spec_augment=bool(_mcfg.get("use_spec_augment", False)),
+        backbone_name=_backbone_name,
+        pretrained=_pretrained,
     ).to(DEVICE)
+    _ckpt_extra = {"backbone_name": _backbone_name, "pretrained": _pretrained}
 
     head_params = (
         list(model.emotion_head.parameters()) +
@@ -355,6 +348,7 @@ def main():
         wandb_latest_artifact_every_steps=WANDB_LATEST_ARTIFACT_EVERY_STEPS,
         step_artifact_name="stage1-step",
         latest_artifact_name="stage1-latest",
+        ckpt_extra=_ckpt_extra,
     )
 
     _ccfg = CFG.get("compile", {})
@@ -467,6 +461,7 @@ def main():
                 'num_emotions': num_emotions,
                 'num_genders': num_genders,
                 'num_ages': num_ages,
+                **_ckpt_extra,
             }, model_path)
             print(f"Saved best model to {model_path}")
             if wandb_run is not None and WANDB_UPLOAD_BEST_ARTIFACT:
@@ -496,6 +491,7 @@ def main():
             'num_emotions': num_emotions,
             'num_genders': num_genders,
             'num_ages': num_ages,
+            **_ckpt_extra,
         }, latest_path)
         if wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT and WANDB_LATEST_ARTIFACT_EVERY_STEPS <= 0:
             save_wandb_file_artifact(
@@ -513,14 +509,6 @@ def main():
     if wandb_run is not None:
         wandb_run.finish()
 
-
-# ── Backward-compatible aliases ─────────────────────────────────────────────
-_make_cosine_schedule = make_cosine_schedule
-_unwrap = unwrap
-_sigint_handler = sigint_handler
-_save_wandb_file_artifact = save_wandb_file_artifact
-_save_step_checkpoint = save_step_checkpoint
-_rotate_step_checkpoints = rotate_step_checkpoints
 
 if __name__ == "__main__":
     try:
