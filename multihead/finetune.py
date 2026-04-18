@@ -65,12 +65,12 @@ from utils.finetune_utils import (
     unfreeze_layers,
 )
 from utils.finetune_utils import print_lr_schedule as _print_lr_schedule
+from utils.config import load_stage_config
 from utils.misc import (
     BATCH_SIZE_ENV_VAR,
     RANDOM_SEED,
     _ALL_TASKS,
     apply_cuda_perf_flags,
-    resolve_batch_size,
     set_seed,
     sigint_handler,
     unwrap,
@@ -83,45 +83,56 @@ from utils.training import (
     validate,
 )
 
-BATCH_SIZE = resolve_batch_size(default=8)
-NUM_EPOCHS = 20
+CFG = load_stage_config(2)
+_tcfg = CFG["training"]
+_ftcfg = CFG.get("finetune", {})
+_mcfg = CFG.get("model", {})
+_SCHED = _tcfg.get("scheduler", {})
 
-BACKBONE_LR_TOP = 5e-5
-LAYER_DECAY = 0.85
-HEAD_LR = 2e-4
+BATCH_SIZE = CFG["runtime"]["batch_size"]
+NUM_EPOCHS = int(_tcfg["num_epochs"])
 
-EMOTION_WEIGHT = 1.0
-GENDER_WEIGHT = 1.0
-AGE_WEIGHT = 1.0
-GRAD_CLIP_NORM = 1.0
+BACKBONE_LR_TOP = float(_ftcfg.get("backbone_lr_top", 5e-5))
+LAYER_DECAY = float(_ftcfg.get("layer_decay", 0.85))
+HEAD_LR = float(_ftcfg.get("head_lr", _tcfg.get("head_learning_rate", 2e-4)))
+
+EMOTION_WEIGHT = float(_tcfg["emotion_weight"])
+GENDER_WEIGHT = float(_tcfg["gender_weight"])
+AGE_WEIGHT = float(_tcfg["age_weight"])
+GRAD_CLIP_NORM = float(_tcfg["grad_clip_norm"])
+LABEL_SMOOTHING = float(_tcfg.get("label_smoothing", 0.1))
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 FINETUNE_DIR = MODEL_DIR / "finetune"
 FINETUNE_DIR.mkdir(parents=True, exist_ok=True)
 
-UNFREEZE_TOP_N = 4
-UNFREEZE_FEATURE_PROJ = False
+UNFREEZE_TOP_N = int(_ftcfg.get("unfreeze_top_n", 4))
+UNFREEZE_FEATURE_PROJ = bool(_ftcfg.get("unfreeze_feature_proj", False))
+TRAINING_DROP_PATH = float(_ftcfg.get("training_drop_path", 0.1))
+INIT_FROM = str(_ftcfg.get("init_from", "") or "")
 ANALYZE_ONLY = "--analyze" in sys.argv
-EARLY_STOPPING_PATIENCE = 5
+EARLY_STOPPING_PATIENCE = int(_tcfg["early_stopping_patience"])
 
-NUM_CHECKPOINTS = int(os.environ.get("NUM_CHECKPOINTS", "5"))
-CHECKPOINT_EVERY_STEPS = int(os.environ.get("CHECKPOINT_EVERY_STEPS", "0"))
-CHECKPOINT_KEEP_LAST_N_STEP_FILES = int(os.environ.get("CHECKPOINT_KEEP_LAST_N_STEP_FILES", str(NUM_CHECKPOINTS)))
-CHECKPOINT_SAVE_LATEST_EVERY_STEPS = os.environ.get("CHECKPOINT_SAVE_LATEST_EVERY_STEPS", "0").strip().lower() in {"1", "true", "yes"}
-NUM_VALIDATIONS = int(os.environ.get("NUM_VALIDATIONS", "5"))
-VAL_EVERY_STEPS = int(os.environ.get("VAL_EVERY_STEPS", "0"))
+_RT = CFG["runtime"]
+NUM_CHECKPOINTS = _RT["num_checkpoints"]
+CHECKPOINT_EVERY_STEPS = _RT["checkpoint_every_steps"]
+CHECKPOINT_KEEP_LAST_N_STEP_FILES = _RT["keep_last_n"]
+CHECKPOINT_SAVE_LATEST_EVERY_STEPS = _RT["save_latest_every_steps"]
+NUM_VALIDATIONS = _RT["num_validations"]
+VAL_EVERY_STEPS = _RT["val_every_steps"]
 
-WANDB_ENABLED = os.environ.get("WANDB_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
-WANDB_ENTITY = os.environ.get("WANDB_ENTITY", "")
-WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "audio-clf")
-WANDB_RUN_NAME = os.environ.get("WANDB_RUN_NAME", "")
-WANDB_RUN_GROUP = os.environ.get("WANDB_RUN_GROUP", "")
-WANDB_MODE = os.environ.get("WANDB_MODE", "")
-WANDB_TAGS = [t.strip() for t in os.environ.get("WANDB_TAGS", "").split(",") if t.strip()]
-WANDB_UPLOAD_BEST_ARTIFACT = os.environ.get("WANDB_UPLOAD_BEST_ARTIFACT", "1").strip().lower() in {"1", "true", "yes"}
-WANDB_UPLOAD_LATEST_ARTIFACT = os.environ.get("WANDB_UPLOAD_LATEST_ARTIFACT", "1").strip().lower() in {"1", "true", "yes"}
-WANDB_UPLOAD_STEP_ARTIFACT = os.environ.get("WANDB_UPLOAD_STEP_ARTIFACT", "1").strip().lower() in {"1", "true", "yes"}
-WANDB_LATEST_ARTIFACT_EVERY_STEPS = int(os.environ.get("WANDB_LATEST_ARTIFACT_EVERY_STEPS", "0"))
+_WB = _RT["wandb"]
+WANDB_ENABLED = _WB["enabled"]
+WANDB_ENTITY = _WB["entity"]
+WANDB_PROJECT = _WB["project"]
+WANDB_RUN_NAME = _WB["run_name"]
+WANDB_RUN_GROUP = _WB["run_group"]
+WANDB_MODE = _WB["mode"]
+WANDB_TAGS = _WB["tags"]
+WANDB_UPLOAD_BEST_ARTIFACT = _WB["upload_best"]
+WANDB_UPLOAD_LATEST_ARTIFACT = _WB["upload_latest"]
+WANDB_UPLOAD_STEP_ARTIFACT = _WB["upload_step"]
+WANDB_LATEST_ARTIFACT_EVERY_STEPS = _WB["latest_every_steps"]
 
 
 def main() -> None:
@@ -163,6 +174,7 @@ def main() -> None:
     latest_ft_path = FINETUNE_DIR / "latest_checkpoint_finetune.pt"
     step_ckpt_dir = FINETUNE_DIR / "steps"
 
+    _default_init = Path(INIT_FROM) if INIT_FROM else (MODEL_DIR / "best_model.pt")
     _is_finetune_resume = False
     if latest_ft_path.exists():
         _peek = torch.load(latest_ft_path, map_location="cpu", weights_only=False)
@@ -173,9 +185,9 @@ def main() -> None:
             ckpt_path = latest_ft_path
             _is_finetune_resume = True
         else:
-            ckpt_path = MODEL_DIR / "best_model.pt"
+            ckpt_path = _default_init
     else:
-        ckpt_path = MODEL_DIR / "best_model.pt"
+        ckpt_path = _default_init
 
     if not ckpt_path.exists():
         print("ERROR: No checkpoint found. Run multihead/train.py (stage 1) first.", file=sys.stderr)
@@ -194,13 +206,13 @@ def main() -> None:
         num_emotions=num_emotions,
         num_genders=num_genders,
         num_ages=num_ages,
-        freeze_backbone=True,
-        use_spec_augment=True,
+        freeze_backbone=bool(_mcfg.get("freeze_backbone", True)),
+        use_spec_augment=bool(_mcfg.get("use_spec_augment", True)),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     if hasattr(model.hubert.config, 'training_drop_path'):
-        model.hubert.config.training_drop_path = 0.1
+        model.hubert.config.training_drop_path = TRAINING_DROP_PATH
 
     unfreeze_layers(
         model,
@@ -215,10 +227,13 @@ def main() -> None:
                                 BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
     scheduler = make_cosine_schedule(
         optimizer,
-        hold_epochs=5,
-        decay_epochs=15,
-        scale_group_decay=True,
-        group_power_range=(0.8, 1.3),
+        hold_epochs=int(_SCHED.get("hold_epochs", 5)),
+        decay_epochs=int(_SCHED.get("decay_epochs", 15)),
+        scale_group_decay=bool(_SCHED.get("scale_group_decay", True)),
+        group_power_range=(
+            float(_SCHED.get("group_power_lo", 0.8)),
+            float(_SCHED.get("group_power_hi", 1.3)),
+        ),
     )
 
     train_state = {'best_val_loss': float("inf")}
@@ -228,7 +243,6 @@ def main() -> None:
     if step_val_metrics_path.exists():
         with open(step_val_metrics_path) as f:
             all_step_val_metrics = json.load(f)
-    last_epoch = -1
     start_epoch = 0
     epochs_without_improvement = 0
     step_state = {'global_step': 0, 'samples_seen': 0}
@@ -284,10 +298,12 @@ def main() -> None:
                 wandb_kwargs['mode'] = WANDB_MODE
             wandb_run = wandb.init(**wandb_kwargs)
 
-    if device.type == 'cuda' and hasattr(torch, 'compile'):
+    _ccfg = CFG.get("compile", {})
+    if bool(_ccfg.get("enabled", True)) and device.type == 'cuda' and hasattr(torch, 'compile'):
+        _cmode = str(_ccfg.get("mode", "default"))
         try:
-            print("Compiling model with torch.compile(mode='default')...")
-            model = torch.compile(model, mode='default', dynamic=None)
+            print(f"Compiling model with torch.compile(mode='{_cmode}')...")
+            model = torch.compile(model, mode=_cmode, dynamic=None)
         except Exception as e:
             print(f"  torch.compile unavailable ({e}), running eager.")
 
@@ -329,28 +345,32 @@ def main() -> None:
 
     train_dataset = AudioDataset(
         train_split, processor, emotion_encoder, gender_encoder, age_encoder,
-        is_train=True, noise_dir=os.environ.get("NOISE_DIR"),
+        is_train=True, noise_dir=CFG["runtime"]["noise_dir"],
     )
 
     pin = device.type == "cuda"
+    _dl = CFG.get("dataloader", {})
+    _nw = int(_dl.get("num_workers", 4))
+    _pf = int(_dl.get("prefetch_factor", 2))
+    _pw = bool(_dl.get("persistent_workers", True))
     train_loader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=4, pin_memory=pin, persistent_workers=True, prefetch_factor=2,
+        num_workers=_nw, pin_memory=pin, persistent_workers=_pw, prefetch_factor=_pf,
     )
     val_loaders = {
         name: DataLoader(
             AudioDataset(split, processor, emotion_encoder, gender_encoder, age_encoder,
                          is_train=False, noise_dir=None),
             batch_size=BATCH_SIZE, shuffle=False,
-            num_workers=4, pin_memory=pin, persistent_workers=True, prefetch_factor=2,
+            num_workers=_nw, pin_memory=pin, persistent_workers=_pw, prefetch_factor=_pf,
         )
         for name, split in named_val_splits.items()
     }
     _primary_val = next(iter(val_loaders))
 
-    criterion_emotion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    criterion_gender = nn.CrossEntropyLoss(label_smoothing=0.1)
-    criterion_age = nn.CrossEntropyLoss(label_smoothing=0.1)
+    criterion_emotion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    criterion_age = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 
     _total_steps = max(1, (NUM_EPOCHS - start_epoch) * len(train_loader))
     _ckpt_every = CHECKPOINT_EVERY_STEPS
@@ -416,7 +436,6 @@ def main() -> None:
             age_weight=AGE_WEIGHT,
             grad_clip_norm=GRAD_CLIP_NORM,
         )
-        last_epoch = epoch
         print(f"Train Loss - Total: {train_metrics['total']:.4f},  "
               f"Emotion: {train_metrics['emotion']:.4f},  "
               f"Gender: {train_metrics['gender']:.4f},  "
@@ -539,18 +558,7 @@ def main() -> None:
             )
 
     if _utils_misc.stop_requested:
-        int_path = FINETUNE_DIR / "checkpoint_finetune_interrupted.pt"
-        torch.save({
-            "epoch": last_epoch,
-            'global_step': step_state['global_step'],
-            'samples_seen': step_state['samples_seen'],
-            "model_state_dict": unwrap(model).state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "num_emotions": num_emotions,
-            "num_genders": num_genders,
-            "num_ages": num_ages,
-        }, int_path)
-        print(f"\nStopped by user. Checkpoint saved to {int_path}")
+        print("\nStopped by user.")
     else:
         print("\nFine-tuning complete!")
     print(f"Best validation loss: {train_state['best_val_loss']:.4f}")
