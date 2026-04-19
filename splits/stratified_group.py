@@ -8,8 +8,6 @@ per-row group, which is equivalent to plain stratification for those rows.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
-
 import numpy as np
 from sklearn.model_selection import StratifiedGroupKFold
 

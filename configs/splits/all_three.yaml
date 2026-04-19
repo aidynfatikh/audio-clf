@@ -11,8 +11,8 @@ corpora:
     hf_split: train
     cache_dir: data/batch01-validation-test
     ratios: {train: 0.70, val: 0.15, test: 0.15}
-    augmented_policy: train_only   # drop_all | keep_all | train_only
     speaker_column: speaker_id
+    augmented_policy: train_only
 
   batch02:
     mode: split
@@ -20,8 +20,11 @@ corpora:
     hf_split: train
     cache_dir: data/batch2-aug-clean
     ratios: {train: 0.90, val: 0.05, test: 0.05}
-    augmented_policy: train_only   # drop_all | keep_all | train_only
-    speaker_column: speaker_id
+    # Group by `original_name` so all chunks of the same source recording
+    # (and their aug copies) stay in one split. See
+    # configs/splits/batch01_plus_batch02.yaml for the rationale.
+    group_by: source_recording
+    augmented_policy: train_only
 
   kazemo:
     mode: split

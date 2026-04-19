@@ -6,6 +6,8 @@ cd "$(dirname "$0")/.."
 [[ -f .env ]] && set -a && source .env && set +a
 
 export CUDA_VISIBLE_DEVICES=1
+# Force HuBERT — .env may set BACKBONE=wavlm for another session.
+export BACKBONE=hubert
 TS=$(date +%Y%m%d-%H%M%S)
 
 # label | split-dir | config

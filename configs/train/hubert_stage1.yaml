@@ -13,6 +13,11 @@ training:
   grad_clip_norm: 1.0
   early_stopping_patience: 20
   label_smoothing: 0.1
+  # balanced = sklearn 'balanced' weights (w_i = N / (K * n_i)); equalises each
+  # class's total gradient mass so rare classes aren't drowned out by common
+  # ones. Weights are computed from the training split only. Set to 'none' to
+  # restore unweighted CE.
+  class_weighting: balanced
   weight_decay: 0.01
   default_batch_size: 4
   scheduler:

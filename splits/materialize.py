@@ -10,8 +10,6 @@ Used by both:
 
 from __future__ import annotations
 
-import json
-import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -24,8 +22,6 @@ from splits.schema import (
     DATASET_BATCH01,
     DATASET_BATCH02,
     DATASET_KAZEMO,
-    SPLIT_TEST,
-    SPLIT_TRAIN,
     SPLIT_VAL,
 )
 

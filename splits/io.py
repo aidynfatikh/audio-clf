@@ -16,9 +16,6 @@ from splits.schema import (
     ALL_SPLITS,
     MANIFEST_COLUMNS,
     NormalizedRow,
-    SPLIT_TEST,
-    SPLIT_TRAIN,
-    SPLIT_VAL,
 )
 
 BUILDER_VERSION = "1"
@@ -167,8 +164,8 @@ def build_summary(
         "gender_counts": {s: dict(sorted(c.items())) for s, c in per_split_gender.items()},
         "age_counts": {s: dict(sorted(c.items())) for s, c in per_split_age.items()},
         "speaker_counts": {s: len(v) for s, v in per_split_speakers.items()},
-        "speakers_per_corpus_split": {
-            f"{ds}:{sp}": sorted(v) for (ds, sp), v in per_ds_split_speakers.items()
+        "speaker_counts_per_corpus_split": {
+            f"{ds}:{sp}": len(v) for (ds, sp), v in per_ds_split_speakers.items()
         },
     }
     if kazemo_resolved:

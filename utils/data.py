@@ -217,6 +217,53 @@ class AudioDataset(TorchDataset):
         }
 
 
+def compute_class_weights(split, encoders: dict[str, dict[str, int]]) -> dict[str, list[float]]:
+    """Compute sklearn-style 'balanced' class weights per task.
+
+    ``w_i = N / (K * n_i)`` so each class's total gradient mass ``n_i * w_i``
+    equals the constant ``N / K`` — i.e. every class contributes equally to the
+    loss regardless of how rare/common it is.
+
+    Rows with missing labels (encoded as -100) are ignored in the count.
+    Classes with zero samples get weight 0 (they can't be learned anyway) and
+    trigger a warning.
+    """
+    import warnings
+
+    weights: dict[str, list[float]] = {}
+    task_to_field = {"emotion": "emotion", "gender": "gender", "age": "age_category"}
+    no_audio = split.remove_columns(["audio"]) if "audio" in split.column_names else split
+    for task, field in task_to_field.items():
+        enc = encoders[task]
+        K = len(enc)
+        counts = [0] * K
+        for row in no_audio:
+            v = row.get(field)
+            if v is None:
+                continue
+            s = str(v).strip()
+            if not s or s not in enc:
+                continue
+            counts[enc[s]] += 1
+        N = sum(counts)
+        if N == 0:
+            warnings.warn(f"compute_class_weights: task={task!r} has no labeled rows; weights=1s", stacklevel=2)
+            weights[task] = [1.0] * K
+            continue
+        w = []
+        for c in counts:
+            if c == 0:
+                warnings.warn(
+                    f"compute_class_weights: task={task!r} has zero samples for a class; setting weight=0",
+                    stacklevel=2,
+                )
+                w.append(0.0)
+            else:
+                w.append(N / (K * c))
+        weights[task] = w
+    return weights
+
+
 def build_label_encoders(dataset):
     emotions: set[str] = set()
     genders: set[str] = set()

@@ -13,6 +13,7 @@ training:
   grad_clip_norm: 1.0
   early_stopping_patience: 20
   label_smoothing: 0.1
+  class_weighting: balanced   # balanced | none (see hubert_stage1.yaml for details)
   weight_decay: 0.01
   default_batch_size: 4
   scheduler:

@@ -15,8 +15,6 @@ from splits.kazemo_speakers import kazemo_three_way_split, resolve_kazemo_speake
 from splits.schema import (
     ALL_DATASETS,
     ALL_SPLITS,
-    DATASET_BATCH01,
-    DATASET_BATCH02,
     DATASET_KAZEMO,
     NormalizedRow,
     SPLIT_TEST,
@@ -59,17 +57,33 @@ def _assign_train_only(rows: list[NormalizedRow]) -> dict[str, list[int]]:
 
 
 def _check_speaker_disjoint(assignments: dict[str, list[NormalizedRow]]) -> list[str]:
-    """Return speakers leaking between train and (val ∪ test).
+    """Return ``"<dataset>:<speaker>"`` entries that leak across splits.
 
-    Val ↔ test sharing a speaker is *allowed* by design — KazEmo's rule puts
-    one speaker in both val and test because only 3 speakers exist. The real
-    leakage concern is a train speaker reappearing in an eval split.
+    Per-dataset rules:
+      * train ↔ val and train ↔ test overlap is *never* allowed.
+      * val ↔ test overlap is allowed only for KazEmo (only 3 speakers exist,
+        so one speaker is intentionally shared between val and test).
     """
-    train_spk = {r["speaker_id"] for r in assignments.get(SPLIT_TRAIN, []) if r.get("speaker_id")}
-    val_spk = {r["speaker_id"] for r in assignments.get(SPLIT_VAL, []) if r.get("speaker_id")}
-    test_spk = {r["speaker_id"] for r in assignments.get(SPLIT_TEST, []) if r.get("speaker_id")}
-    leaked = (train_spk & val_spk) | (train_spk & test_spk)
-    return sorted(leaked)
+    per_ds: dict[str, dict[str, set[str]]] = {}
+    for split, rows in assignments.items():
+        for r in rows:
+            spk = r.get("speaker_id")
+            if not spk:
+                continue
+            ds = r["dataset"]
+            buckets = per_ds.setdefault(ds, {s: set() for s in ALL_SPLITS})
+            buckets[split].add(spk)
+
+    leaked: list[str] = []
+    for ds, buckets in per_ds.items():
+        train_val = buckets[SPLIT_TRAIN] & buckets[SPLIT_VAL]
+        train_test = buckets[SPLIT_TRAIN] & buckets[SPLIT_TEST]
+        for spk in sorted(train_val | train_test):
+            leaked.append(f"{ds}:{spk}")
+        if ds != DATASET_KAZEMO:
+            for spk in sorted(buckets[SPLIT_VAL] & buckets[SPLIT_TEST]):
+                leaked.append(f"{ds}:{spk}")
+    return leaked
 
 
 def _check_row_id_disjoint(assignments: dict[str, list[NormalizedRow]]) -> list[tuple[str, str]]:
@@ -150,13 +164,13 @@ def _split_corpus(
     global_stratify_by: str,
     global_seed: int,
     speaker_disjoint: bool,
-) -> tuple[dict[str, list[int]], dict[str, Any] | None]:
-    """Return (indices_per_split, kazemo_resolved_if_any)."""
+) -> tuple[dict[str, list[int]], dict[str, Any] | None, dict[str, int]]:
+    """Return (indices_per_split, kazemo_resolved_if_any, builder_drop_stats)."""
     mode = _normalize_mode(ds_cfg.get("mode"))
     if mode == "off":
-        return {SPLIT_TRAIN: [], SPLIT_VAL: [], SPLIT_TEST: []}, None
+        return {SPLIT_TRAIN: [], SPLIT_VAL: [], SPLIT_TEST: []}, None, {}
     if mode == "train_only":
-        return _assign_train_only(rows), None
+        return _assign_train_only(rows), None, {}
     if mode != "split":
         raise ValueError(f"{name}: unknown mode={mode!r}")
 
@@ -184,7 +198,7 @@ def _split_corpus(
             "train_speakers": sorted(train_spk),
             "valtest_speaker": valtest_spk,
         }
-        return idx, resolved
+        return idx, resolved, {}
 
     # batch01/batch02 — stratified grouped
     stratify_by = ds_cfg.get("stratify_by", global_stratify_by)
@@ -201,7 +215,7 @@ def _split_corpus(
             group_by_field=group_field,
             seed=ds_cfg.get("seed", global_seed),
         )
-        return idx, None
+        return idx, None, {"augmented_policy": policy}
 
     # drop_all / train_only — sources.py has already filtered aug rows for
     # drop_all. For train_only, rows here contain both aug and non-aug; we
@@ -222,6 +236,7 @@ def _split_corpus(
         split: [non_aug_idx[j] for j in core[split]] for split in core
     }
 
+    drop_stats: dict[str, int] = {"augmented_policy": policy}
     if policy == "train_only" and aug_idx:
         train_spk = {
             rows[i].get("speaker_id") for i in idx[SPLIT_TRAIN] if rows[i].get("speaker_id")
@@ -232,23 +247,33 @@ def _split_corpus(
             for i in idx[split]
             if rows[i].get("speaker_id")
         }
-        kept, leaked = 0, 0
+        kept, leaked, unattributed = 0, 0, 0
         for i in aug_idx:
             spk = rows[i].get("speaker_id")
-            # Without speaker info we can't prove leakage; route aug → train anyway,
-            # relying on row-id disjointness (aug rows have distinct ids from non-aug).
-            if spk is None or spk in train_spk or spk not in val_test_spk:
+            if spk is None:
+                # Can't prove no leakage — drop rather than risk polluting train.
+                unattributed += 1
+                continue
+            if spk in train_spk or spk not in val_test_spk:
                 idx[SPLIT_TRAIN].append(i)
                 kept += 1
             else:
                 leaked += 1
         print(
             f"[builder] {name}: augmented_policy=train_only — "
-            f"added {kept} aug rows to train, dropped {leaked} aug rows "
-            f"whose speaker landed in val/test (leakage)"
+            f"added {kept} aug rows to train, dropped {leaked} with val/test speaker, "
+            f"dropped {unattributed} with unknown speaker"
         )
+        drop_stats.update(
+            aug_added_to_train=kept,
+            aug_dropped_val_test_speaker=leaked,
+            aug_dropped_unknown_speaker=unattributed,
+        )
+    elif policy == "drop_all":
+        # Rows with augmented=True were already filtered at source.
+        drop_stats["note"] = "aug rows filtered at source"
 
-    return idx, None
+    return idx, None, drop_stats
 
 
 def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
@@ -274,6 +299,7 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
 
     # 1) Load each configured corpus → NormalizedRow lists
     loaded: dict[str, list[NormalizedRow]] = {}
+    load_stats: dict[str, dict[str, int]] = {}
     for ds_name in ALL_DATASETS:
         ds_cfg = corpora.get(ds_name, {}) or {}
         mode = _normalize_mode(ds_cfg.get("mode"))
@@ -283,16 +309,19 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
         if "cache_dir" in ds_cfg:
             ds_cfg = dict(ds_cfg)
             ds_cfg["cache_dir"] = _resolve_cache_dir(ds_cfg.get("cache_dir"), f"data/{ds_name}")
-        loaded[ds_name] = load_corpus(ds_name, ds_cfg)
+        rows, stats = load_corpus(ds_name, ds_cfg)
+        loaded[ds_name] = rows
+        load_stats[ds_name] = stats
 
     # 2) Split each corpus independently
     assignments: dict[str, list[NormalizedRow]] = {s: [] for s in ALL_SPLITS}
     kazemo_resolved: dict[str, Any] | None = None
+    builder_stats: dict[str, dict[str, Any]] = {}
     for ds_name, rows in loaded.items():
         ds_cfg = dict(corpora.get(ds_name, {}))
         if "cache_dir" in ds_cfg:
             ds_cfg["cache_dir"] = _resolve_cache_dir(ds_cfg.get("cache_dir"), f"data/{ds_name}")
-        idx_map, resolved = _split_corpus(
+        idx_map, resolved, bstats = _split_corpus(
             ds_name,
             ds_cfg,
             rows,
@@ -302,6 +331,7 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
         )
         if resolved and ds_name == DATASET_KAZEMO:
             kazemo_resolved = resolved
+        builder_stats[ds_name] = bstats
         for split, idxs in idx_map.items():
             for i in idxs:
                 assignments[split].append(rows[i])
@@ -316,7 +346,7 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
     errors: list[str] = []
     spk_overlap = _check_speaker_disjoint(assignments) if speaker_disjoint else []
     if spk_overlap:
-        msg = f"Speakers appearing in multiple splits: {sorted(spk_overlap)[:20]} (total={len(spk_overlap)})"
+        msg = f"Speaker leakage (dataset:speaker): {sorted(spk_overlap)[:20]} (total={len(spk_overlap)})"
         (errors if fail_spk else []).append(msg)
         print(f"[builder][warn] {msg}")
 
@@ -336,7 +366,33 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
         msg = f"ratio drift exceeds {max_drift} pp: {drift_errs}"
         print(f"[builder][warn] {msg}")
 
-    # 4) Write parquet + summary.json
+    # 4) Build per-corpus dropped-rows report (source → load → split → final)
+    dropped_rows: dict[str, dict[str, Any]] = {}
+    for ds_name in loaded:
+        lstat = load_stats.get(ds_name, {})
+        bstat = builder_stats.get(ds_name, {})
+        assigned = sum(
+            1 for s in ALL_SPLITS for r in assignments[s] if r["dataset"] == ds_name
+        )
+        reasons: dict[str, int] = {}
+        if lstat.get("dropped_at_source_aug"):
+            reasons["aug_rows_filtered_at_source"] = int(lstat["dropped_at_source_aug"])
+        if lstat.get("dropped_missing_speaker"):
+            reasons["rows_without_parsable_speaker"] = int(lstat["dropped_missing_speaker"])
+        if bstat.get("aug_dropped_val_test_speaker"):
+            reasons["aug_copy_of_val_test_speaker"] = int(bstat["aug_dropped_val_test_speaker"])
+        if bstat.get("aug_dropped_unknown_speaker"):
+            reasons["aug_with_unknown_speaker"] = int(bstat["aug_dropped_unknown_speaker"])
+        dropped_rows[ds_name] = {
+            "source_rows": int(lstat.get("source_rows", 0)),
+            "loaded": int(lstat.get("kept", 0)),
+            "assigned": assigned,
+            "augmented_policy": bstat.get("augmented_policy"),
+            "aug_added_to_train": int(bstat.get("aug_added_to_train", 0)),
+            "reasons": reasons,
+        }
+
+    # 5) Write parquet + summary.json
     paths = write_manifests(split_dir, assignments)
     summary = build_summary(
         config=cfg,
@@ -349,6 +405,7 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
             "emotion_coverage_warnings": _check_emotion_coverage(assignments, min_emo)
             if min_emo > 0
             else [],
+            "dropped_rows": dropped_rows,
         },
     )
     write_summary(split_dir, summary)

@@ -11,17 +11,25 @@ corpora:
     hf_split: train
     cache_dir: data/batch01-validation-test
     ratios: {train: 0.70, val: 0.15, test: 0.15}
-    augmented_policy: train_only   # drop_all | keep_all | train_only
+    # batch01 has an explicit `speaker_id` on both clean and aug rows, so we can
+    # route aug copies to the train speakers without leaking them into val/test.
     speaker_column: speaker_id
+    augmented_policy: train_only   # drop_all | keep_all | train_only
 
   batch02:
     mode: split
     hf_id: 01gumano1d/batch2-aug-clean
     hf_split: train
     cache_dir: data/batch2-aug-clean
-    ratios: {train: 0.90, val: 0.05, test: 0.05}
-    augmented_policy: train_only   # drop_all | keep_all | train_only
-    speaker_column: speaker_id
+    ratios: {train: 0.9, val: 0.05, test: 0.05}
+    # batch02 has NO speaker_id column. We group by `original_name` — the
+    # source-recording label present on every row — so all chunks of the same
+    # audio (and their augmented copies) stay in the same split. This is
+    # stricter than per-chunk grouping (no same-audio leakage between splits).
+    # Still not a true speaker check (one recording may contain several
+    # speakers) but that's the best signal available without diarization.
+    group_by: source_recording
+    augmented_policy: train_only
 
   kazemo:
     mode: "off"

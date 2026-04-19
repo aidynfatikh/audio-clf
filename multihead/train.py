@@ -43,7 +43,7 @@ from utils.checkpointing import (
     make_cosine_schedule,
     save_wandb_file_artifact,
 )
-from utils.data import AudioDataset, build_label_encoders
+from utils.data import AudioDataset, build_label_encoders, compute_class_weights
 from utils.data_loading import (
     KAZEMO_MAX_SAMPLES,
     USE_KAZEMO,
@@ -81,6 +81,7 @@ AGE_WEIGHT = float(_tcfg["age_weight"])
 GRAD_CLIP_NORM = float(_tcfg["grad_clip_norm"])
 EARLY_STOPPING_PATIENCE = int(_tcfg["early_stopping_patience"])
 LABEL_SMOOTHING = float(_tcfg.get("label_smoothing", 0.1))
+CLASS_WEIGHTING = str(_tcfg.get("class_weighting", "none")).strip().lower()
 WEIGHT_DECAY = float(_tcfg.get("weight_decay", 0.01))
 _SCHED = _tcfg.get("scheduler", {})
 
@@ -234,9 +235,26 @@ def main():
         decay_epochs=int(_SCHED.get("decay_epochs", 7)),
     )
 
-    criterion_emotion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    criterion_gender = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
-    criterion_age = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    _cls_w: dict[str, torch.Tensor] | None = None
+    if CLASS_WEIGHTING == "balanced":
+        _raw_w = compute_class_weights(
+            train_split,
+            {"emotion": emotion_encoder, "gender": gender_encoder, "age": age_encoder},
+        )
+        _cls_w = {k: torch.tensor(v, dtype=torch.float32, device=DEVICE) for k, v in _raw_w.items()}
+        for task, enc in (("emotion", emotion_encoder), ("gender", gender_encoder), ("age", age_encoder)):
+            inv_enc = {i: lbl for lbl, i in enc.items()}
+            pairs = ", ".join(f"{inv_enc[i]}={w:.3f}" for i, w in enumerate(_raw_w[task]))
+            print(f"  Class weights [{task}]: {pairs}")
+    elif CLASS_WEIGHTING not in ("none", ""):
+        raise ValueError(f"training.class_weighting must be 'balanced' or 'none', got {CLASS_WEIGHTING!r}")
+
+    criterion_emotion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING,
+                                            weight=_cls_w["emotion"] if _cls_w else None)
+    criterion_gender = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING,
+                                           weight=_cls_w["gender"] if _cls_w else None)
+    criterion_age = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING,
+                                        weight=_cls_w["age"] if _cls_w else None)
 
     metrics_path = MODEL_DIR / "training_metrics.json"
     latest_path = MODEL_DIR / "latest_checkpoint.pt"
