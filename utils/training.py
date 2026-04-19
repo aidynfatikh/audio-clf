@@ -273,6 +273,82 @@ def validate(
     }
 
 
+def evaluate_and_save_test_results(
+    *,
+    model,
+    test_split,
+    processor,
+    emotion_encoder,
+    gender_encoder,
+    age_encoder,
+    criterion_emotion,
+    criterion_gender,
+    criterion_age,
+    device,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+    persistent_workers: bool,
+    pin_memory: bool,
+    emotion_weight: float,
+    gender_weight: float,
+    age_weight: float,
+    out_path: Path,
+    best_ckpt_path: Path | None = None,
+    label: str = "test",
+) -> dict:
+    """Evaluate *model* on *test_split* and write metrics to *out_path* (JSON).
+
+    If *best_ckpt_path* is given and exists, its ``model_state_dict`` is loaded
+    into *model* before eval so the reported metrics reflect the best model
+    rather than whatever weights were left at the end of training.
+    """
+    from torch.utils.data import DataLoader
+
+    from utils.data import AudioDataset
+
+    if test_split is None or len(test_split) == 0:
+        print(f"[{label}] Skipping test eval — empty/missing test split.")
+        return {}
+
+    if best_ckpt_path is not None and Path(best_ckpt_path).exists():
+        ckpt = torch.load(best_ckpt_path, map_location=device, weights_only=False)
+        unwrap(model).load_state_dict(ckpt["model_state_dict"])
+        print(f"[{label}] Loaded best checkpoint: {best_ckpt_path}")
+
+    test_ds = AudioDataset(
+        test_split, processor, emotion_encoder, gender_encoder, age_encoder,
+        is_train=False, noise_dir=None,
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=pin_memory,
+        persistent_workers=persistent_workers, prefetch_factor=prefetch_factor,
+    )
+    metrics = validate(
+        model, test_loader, criterion_emotion, criterion_gender, criterion_age,
+        device,
+        emotion_weight=emotion_weight,
+        gender_weight=gender_weight,
+        age_weight=age_weight,
+    )
+    record = {
+        "label": label,
+        "num_samples": len(test_split),
+        "best_ckpt": str(best_ckpt_path) if best_ckpt_path else None,
+        "metrics": {k: round(float(v), 6) for k, v in metrics.items()},
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(record, f, indent=2)
+    print(
+        f"[{label}] Test results → {out_path}: "
+        f"total={metrics['total']:.4f}  emotion_acc={metrics['emotion_acc']:.4f}  "
+        f"gender_acc={metrics['gender_acc']:.4f}  age_acc={metrics['age_acc']:.4f}"
+    )
+    return record
+
+
 def make_batch_end_handler(
     *,
     step_state: dict,
@@ -290,6 +366,7 @@ def make_batch_end_handler(
     step_ckpt_dir: Path,
     latest_path: Path,
     step_val_metrics_path: Path,
+    step_train_metrics_path: Path | None = None,
     val_every_steps: int,
     val_loaders: dict,
     val_tasks: dict,
@@ -326,6 +403,18 @@ def make_batch_end_handler(
             if payload["train_age_loss"] is not None:
                 data["train/loss_age"] = payload["train_age_loss"]
             wandb_run.log(data, step=global_step)
+
+        if step_train_metrics_path is not None:
+            rec = {
+                "global_step": global_step,
+                "epoch": payload["epoch"] + 1,
+                "train_total_loss": payload["train_total_loss"],
+                "train_emotion_loss": payload["train_emotion_loss"],
+                "train_gender_loss": payload["train_gender_loss"],
+                "train_age_loss": payload["train_age_loss"],
+            }
+            with open(step_train_metrics_path, "a") as f:
+                f.write(json.dumps(rec) + "\n")
 
         if checkpoint_every_steps > 0 and global_step % checkpoint_every_steps == 0:
             step_path = save_step_checkpoint(

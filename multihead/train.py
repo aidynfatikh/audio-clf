@@ -61,6 +61,7 @@ from utils.misc import (
 )
 from utils.training import (
     _wandb_val_keys,
+    evaluate_and_save_test_results,
     filter_val_metrics,
     make_batch_end_handler,
     train_epoch,
@@ -263,6 +264,7 @@ def main():
     all_metrics = []
     all_step_val_metrics: list[dict] = []
     step_val_metrics_path = MODEL_DIR / "step_val_metrics.json"
+    step_train_metrics_path = MODEL_DIR / "step_train_metrics.jsonl"
     if step_val_metrics_path.exists():
         with open(step_val_metrics_path) as f:
             all_step_val_metrics = json.load(f)
@@ -350,6 +352,7 @@ def main():
         step_ckpt_dir=step_ckpt_dir,
         latest_path=latest_path,
         step_val_metrics_path=step_val_metrics_path,
+        step_train_metrics_path=step_train_metrics_path,
         val_every_steps=_val_every,
         val_loaders=val_loaders,
         val_tasks=named_val_tasks,
@@ -524,6 +527,38 @@ def main():
     else:
         print("\nTraining completed!")
     print(f"Best validation loss: {train_state['best_val_loss']:.4f}")
+
+    if not _utils_misc.stop_requested and composition.get("mode") == "split_manifest":
+        try:
+            from splits.materialize import materialize_split
+            _splits_map = materialize_split(Path(composition["manifest_dir"]))
+            _test_split = _splits_map.get("test")
+            evaluate_and_save_test_results(
+                model=model,
+                test_split=_test_split,
+                processor=processor,
+                emotion_encoder=emotion_encoder,
+                gender_encoder=gender_encoder,
+                age_encoder=age_encoder,
+                criterion_emotion=criterion_emotion,
+                criterion_gender=criterion_gender,
+                criterion_age=criterion_age,
+                device=DEVICE,
+                batch_size=BATCH_SIZE,
+                num_workers=_nw,
+                prefetch_factor=_pf,
+                persistent_workers=_pw,
+                pin_memory=_pin,
+                emotion_weight=EMOTION_WEIGHT,
+                gender_weight=GENDER_WEIGHT,
+                age_weight=AGE_WEIGHT,
+                out_path=MODEL_DIR / "test_results.json",
+                best_ckpt_path=MODEL_DIR / "best_model.pt",
+                label="stage1",
+            )
+        except Exception as e:
+            print(f"[stage1] Test eval failed: {e}")
+
     if wandb_run is not None:
         wandb_run.finish()
 
