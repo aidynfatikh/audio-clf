@@ -485,13 +485,6 @@ def main():
                 **_ckpt_extra,
             }, model_path)
             print(f"Saved best model to {model_path}")
-            if wandb_run is not None and WANDB_UPLOAD_BEST_ARTIFACT:
-                save_wandb_file_artifact(
-                    wandb_run,
-                    file_path=model_path,
-                    name="stage1-best",
-                    artifact_type='model',
-                )
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
@@ -514,13 +507,6 @@ def main():
             'num_ages': num_ages,
             **_ckpt_extra,
         }, latest_path)
-        if wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT and WANDB_LATEST_ARTIFACT_EVERY_STEPS <= 0:
-            save_wandb_file_artifact(
-                wandb_run,
-                file_path=latest_path,
-                name="stage1-latest",
-                artifact_type='checkpoint',
-            )
 
     if _utils_misc.stop_requested:
         print("\nStopped by user.")
@@ -560,6 +546,11 @@ def main():
             print(f"[stage1] Test eval failed: {e}")
 
     if wandb_run is not None:
+        _best = MODEL_DIR / "best_model.pt"
+        if WANDB_UPLOAD_BEST_ARTIFACT and _best.exists():
+            save_wandb_file_artifact(wandb_run, file_path=_best, name="stage1-best", artifact_type='model')
+        if WANDB_UPLOAD_LATEST_ARTIFACT and latest_path.exists():
+            save_wandb_file_artifact(wandb_run, file_path=latest_path, name="stage1-latest", artifact_type='checkpoint')
         wandb_run.finish()
 
 

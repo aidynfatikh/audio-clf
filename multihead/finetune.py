@@ -549,13 +549,6 @@ def main() -> None:
                 **_ckpt_extra,
             }, best_model_path)
             print(f"  ✓ New best val loss: {train_state['best_val_loss']:.4f} → saved to {best_model_path.name}")
-            if wandb_run is not None and WANDB_UPLOAD_BEST_ARTIFACT:
-                save_wandb_file_artifact(
-                    wandb_run,
-                    file_path=best_model_path,
-                    name="stage2-best",
-                    artifact_type='model',
-                )
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
@@ -578,13 +571,6 @@ def main() -> None:
             "num_ages": num_ages,
             **_ckpt_extra,
         }, latest_ft_path)
-        if wandb_run is not None and WANDB_UPLOAD_LATEST_ARTIFACT and WANDB_LATEST_ARTIFACT_EVERY_STEPS <= 0:
-            save_wandb_file_artifact(
-                wandb_run,
-                file_path=latest_ft_path,
-                name="stage2-latest",
-                artifact_type='checkpoint',
-            )
 
     if _utils_misc.stop_requested:
         print("\nStopped by user.")
@@ -624,6 +610,10 @@ def main() -> None:
             print(f"[stage2] Test eval failed: {e}")
 
     if wandb_run is not None:
+        if WANDB_UPLOAD_BEST_ARTIFACT and best_model_path.exists():
+            save_wandb_file_artifact(wandb_run, file_path=best_model_path, name="stage2-best", artifact_type='model')
+        if WANDB_UPLOAD_LATEST_ARTIFACT and latest_ft_path.exists():
+            save_wandb_file_artifact(wandb_run, file_path=latest_ft_path, name="stage2-latest", artifact_type='checkpoint')
         wandb_run.finish()
 
 
