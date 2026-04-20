@@ -154,7 +154,6 @@ def main():
     (model, emotion_encoder, gender_encoder, age_encoder,
      id2emotion, id2gender, id2age, processor) = load_model(ckpt_path, DEVICE)
 
-    enc_path = Path(MODEL_DIR) / "label_encoders.json"
     dataset = load()
     split = dataset.get("test", dataset.get("validation", dataset.get("val")))
     if split is None:

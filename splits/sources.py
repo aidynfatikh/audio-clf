@@ -18,9 +18,16 @@ from splits.kazemo_speakers import kazemo_filename_stem, parse_kazemo_speaker
 from splits.schema import (
     DATASET_BATCH01,
     DATASET_BATCH02,
+    DATASET_KAZATTSD,
     DATASET_KAZEMO,
     NormalizedRow,
 )
+
+# KazATTSD emotion vocab: neutral/sad/happy/angry/calm/anxious/surprised.
+# Our pipeline vocab (from loaders.kazemo._EMO_MAP): angry/happy/sad/neutral/
+# fearful/surprised. `calm` and `anxious` have no direct equivalent — drop.
+# `surprised` matches directly.
+_KAZATTSD_ALLOWED_EMOTIONS = {"neutral", "sad", "happy", "angry", "surprised"}
 
 
 def _str_or_none(v: Any) -> str | None:
@@ -315,10 +322,41 @@ def load_kazemo(cfg: dict[str, Any]) -> tuple[list[NormalizedRow], dict[str, int
     return rows, stats
 
 
+def load_kazattsd(cfg: dict[str, Any]) -> tuple[list[NormalizedRow], dict[str, int]]:
+    """KazATTSD-batch0: same shape as batch01 (HF dataset with speaker_id column).
+
+    No augmented siblings exist in this dataset, so aug routing is moot.
+    Rows whose emotion isn't in our pipeline vocab (`calm`, `anxious`) are
+    dropped — we don't fold them into adjacent classes to avoid label noise.
+    """
+    rows, stats = _load_hf_corpus(
+        DATASET_KAZATTSD,
+        hf_id=cfg["hf_id"],
+        hf_split=cfg.get("hf_split", "train"),
+        cache_dir=Path(cfg["cache_dir"]),
+        speaker_column=cfg.get("speaker_column", "speaker_id"),
+        drop_augmented=_should_drop_at_source(cfg),
+    )
+    kept: list[NormalizedRow] = []
+    dropped_emo = 0
+    for r in rows:
+        emo = r.get("emotion")
+        if emo not in _KAZATTSD_ALLOWED_EMOTIONS:
+            dropped_emo += 1
+            continue
+        kept.append(r)
+    if dropped_emo:
+        print(f"[sources] kazattsd: dropped {dropped_emo} rows with out-of-vocab emotion")
+    stats["dropped_unmapped_emotion"] = dropped_emo
+    stats["kept"] = len(kept)
+    return kept, stats
+
+
 DISPATCH = {
     DATASET_BATCH01: load_batch01,
     DATASET_BATCH02: load_batch02,
     DATASET_KAZEMO: load_kazemo,
+    DATASET_KAZATTSD: load_kazattsd,
 }
 
 

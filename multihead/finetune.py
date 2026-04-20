@@ -620,7 +620,6 @@ def main() -> None:
                 out_path=FINETUNE_DIR / "test_results_finetune.json",
                 best_ckpt_path=best_model_path,
                 label="stage2",
-                wandb_run=wandb_run,
             )
         except Exception as e:
             print(f"[stage2] Test eval failed: {e}")

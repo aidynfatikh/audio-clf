@@ -8,7 +8,6 @@ take everything before it as the speaker name.
 
 from __future__ import annotations
 
-import os
 import random
 import re
 from pathlib import Path
@@ -78,22 +77,26 @@ def kazemo_filename_stem(row: dict[str, Any]) -> str:
 def kazemo_three_way_split(
     rows: list[NormalizedRow],
     train_speakers: set[str],
-    valtest_speaker: str,
+    valtest_speakers: set[str],
     valtest_ratio: dict[str, float],
     seed: int,
 ) -> dict[str, list[int]]:
     """Deterministic 3-way split for kazemo.
 
     Rows from speakers in ``train_speakers`` go to train.
-    Rows from ``valtest_speaker`` are randomly (seeded) partitioned between
-    val and test according to ``valtest_ratio``.
-    Rows from any other speaker are dropped with a clear message.
+    Rows from speakers in ``valtest_speakers`` are randomly (seeded)
+    partitioned between val and test according to ``valtest_ratio``.
+    A speaker appearing in both sets raises — speaker-disjoint is required.
+    Rows from speakers in neither set are dropped.
     """
+    overlap = train_speakers & valtest_speakers
+    if overlap:
+        raise ValueError(f"kazemo: speaker(s) {sorted(overlap)} appear in both train and valtest sets")
+
     val_frac = float(valtest_ratio.get(SPLIT_VAL, 0.5))
     test_frac = float(valtest_ratio.get(SPLIT_TEST, 1.0 - val_frac))
     if val_frac <= 0 or test_frac <= 0:
         raise ValueError(f"valtest_ratio must have positive val/test, got {valtest_ratio}")
-    # Normalize
     total = val_frac + test_frac
     val_frac /= total
 
@@ -105,7 +108,7 @@ def kazemo_three_way_split(
             continue
         if spk in train_speakers:
             out[SPLIT_TRAIN].append(i)
-        elif spk == valtest_speaker:
+        elif spk in valtest_speakers:
             valtest_indices.append(i)
         # else: speaker not assigned — skipped
 
@@ -126,18 +129,22 @@ def resolve_kazemo_speakers(
     valtest_index: int | None = None,
     train_names: list[str] | None = None,
     valtest_name: str | None = None,
-) -> tuple[set[str], str]:
+) -> tuple[set[str], set[str]]:
     """Resolve config-specified speakers against the actually-scanned set.
 
-    Returns (train_speakers_set, valtest_speaker).
+    Returns (train_speakers_set, valtest_speakers_set). The ``valtest_all``
+    strategy puts every discovered speaker into val/test with an empty train
+    set — used when kazemo is held out as an evaluation-only corpus.
     """
     sorted_speakers = sorted(all_speakers)
+    if strategy == "valtest_all":
+        return set(), set(sorted_speakers)
     if strategy == "by_index":
         if train_indices is None or valtest_index is None:
             raise ValueError("by_index strategy requires train_indices and valtest_index")
         try:
             train = {sorted_speakers[i] for i in train_indices}
-            valtest = sorted_speakers[valtest_index]
+            valtest = {sorted_speakers[valtest_index]}
         except IndexError as e:
             raise ValueError(
                 f"kazemo speaker indices out of range; discovered speakers={sorted_speakers}"
@@ -145,16 +152,18 @@ def resolve_kazemo_speakers(
     elif strategy == "by_name":
         if not train_names or not valtest_name:
             raise ValueError("by_name strategy requires train_names and valtest_name")
-        missing = [n for n in (*train_names, valtest_name) if n not in sorted_speakers]
+        _valtest_names = valtest_name if isinstance(valtest_name, list) else [valtest_name]
+        missing = [n for n in (*train_names, *_valtest_names) if n not in sorted_speakers]
         if missing:
             raise ValueError(
                 f"kazemo speakers not found in scan: {missing}; discovered={sorted_speakers}"
             )
         train = set(train_names)
-        valtest = valtest_name
+        valtest = set(_valtest_names)
     else:
         raise ValueError(f"Unknown kazemo speaker_selection.strategy: {strategy!r}")
 
-    if valtest in train:
-        raise ValueError(f"kazemo valtest speaker {valtest!r} overlaps train set {sorted(train)}")
+    overlap = valtest & train
+    if overlap:
+        raise ValueError(f"kazemo valtest speaker(s) {sorted(overlap)} overlap train set {sorted(train)}")
     return train, valtest

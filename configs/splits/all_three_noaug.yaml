@@ -1,9 +1,10 @@
-name: b1_b2_kazemo_noaug_v1
+name: b1_b2_kazattsd_noaug_v1
 seed: 42
 speaker_disjoint: true
 stratify_by: emotion
 output_dir: splits
 
+# KazATTSD replaces KazEmo as a training corpus. KazEmo is eval-only.
 corpora:
   batch01:
     mode: split
@@ -23,15 +24,23 @@ corpora:
     group_by: source_recording
     augmented_policy: drop_all
 
+  kazattsd:
+    mode: split
+    hf_id: 01gumano1d/KazATTSD-batch0
+    hf_split: train
+    cache_dir: data/kazattsd
+    ratios: {train: 0.90, val: 0.05, test: 0.05}
+    speaker_column: speaker_id
+    augmented_policy: drop_all
+
   kazemo:
+    # Eval-only: 5k balanced subsample across all 3 speakers.
     mode: split
     cache_dir: data/kazemo
-    max_samples: null
+    max_samples: 5000
     max_per_speaker: null
     speaker_selection:
-      strategy: by_index
-      train_indices: [0, 1]
-      valtest_index: 2
+      strategy: valtest_all
     valtest_ratio: {val: 0.5, test: 0.5}
 
 checks:

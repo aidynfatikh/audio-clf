@@ -46,7 +46,7 @@ from datasets import Audio
 from tqdm import tqdm
 
 from loaders.load_data import load
-from multihead.utils import AudioDataset, MODEL_DIR, SAMPLE_RATE
+from multihead.utils import AudioDataset, MODEL_DIR
 from eval.inference import load_model
 from eval.results_dir import RESULTS_DIR
 
@@ -626,7 +626,7 @@ def main():
     train_key = next((k for k in dataset.keys() if k == "train"), None)
     print("\nData-split audit:")
     print(f"  Training split used by multihead/train.py  : {train_key or '(first split)'}")
-    print(f"  Validation split used by multihead/train.py: validation → val → test (first match)")
+    print("  Validation split used by multihead/train.py: validation → val → test (first match)")
     print(f"  Splits being evaluated now       : {list(splits_to_eval.keys())}")
     print()
 

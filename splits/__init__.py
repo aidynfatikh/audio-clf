@@ -3,6 +3,7 @@
 from splits.schema import (
     DATASET_BATCH01,
     DATASET_BATCH02,
+    DATASET_KAZATTSD,
     DATASET_KAZEMO,
     NormalizedRow,
     SPLIT_TEST,
@@ -13,6 +14,7 @@ from splits.schema import (
 __all__ = [
     "DATASET_BATCH01",
     "DATASET_BATCH02",
+    "DATASET_KAZATTSD",
     "DATASET_KAZEMO",
     "NormalizedRow",
     "SPLIT_TEST",

@@ -21,6 +21,7 @@ from splits.schema import (
     ALL_SPLITS,
     DATASET_BATCH01,
     DATASET_BATCH02,
+    DATASET_KAZATTSD,
     DATASET_KAZEMO,
     SPLIT_VAL,
 )
@@ -135,7 +136,7 @@ def materialize_split(split_dir: Path) -> dict[str, Dataset]:
 
     # Pick a reference split for feature-casting (first non-kazemo source preferred)
     ref = None
-    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO):
+    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO, DATASET_KAZATTSD):
         if ds in sources:
             ref = sources[ds]
             break
@@ -144,7 +145,7 @@ def materialize_split(split_dir: Path) -> dict[str, Dataset]:
     for split_name in ALL_SPLITS:
         parts: list[Dataset] = []
         # Preserve order: batch01, batch02, kazemo
-        for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO):
+        for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO, DATASET_KAZATTSD):
             key = (split_name, ds)
             if key not in grouped:
                 continue
@@ -192,13 +193,13 @@ def _materialize_per_corpus(split_dir: Path, split_name: str) -> dict[str, Datas
             sources[ds] = _load_hf_source(ds, ds_cfg)
 
     ref = None
-    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO):
+    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO, DATASET_KAZATTSD):
         if ds in sources:
             ref = sources[ds]
             break
 
     named: dict[str, Dataset] = {}
-    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO):
+    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO, DATASET_KAZATTSD):
         if ds in sources and per_ds[ds]:
             sliced = _slice_by_source_index(sources[ds], per_ds[ds])
             named[ds] = _ensure_labels_and_cast(sliced, reference=ref)

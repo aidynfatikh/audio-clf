@@ -160,7 +160,7 @@ def main():
         print(f"  Mode: split_manifest ({composition['manifest_dir']})")
         print(f"  Test total: {composition.get('test_total', 0)}")
     elif _mode == "holdout_manifest":
-        print(f"  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
+        print("  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
         print(f"  Manifest: {composition['manifest']}")
         print(
             f"  batch01 train-only / val holdout: {composition['batch01_train_only']} / {composition['hf_val']}"
@@ -591,7 +591,6 @@ def main():
                 out_path=MODEL_DIR / "test_results.json",
                 best_ckpt_path=MODEL_DIR / "best_model.pt",
                 label="stage1",
-                wandb_run=wandb_run,
             )
         except Exception as e:
             print(f"[stage1] Test eval failed: {e}")

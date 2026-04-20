@@ -244,14 +244,14 @@ def _split_corpus(
         idx = kazemo_three_way_split(
             rows,
             train_speakers=train_spk,
-            valtest_speaker=valtest_spk,
+            valtest_speakers=valtest_spk,
             valtest_ratio=valtest_ratio,
             seed=ds_cfg.get("seed", global_seed),
         )
         resolved = {
             "discovered_speakers": all_speakers,
             "train_speakers": sorted(train_spk),
-            "valtest_speaker": valtest_spk,
+            "valtest_speakers": sorted(valtest_spk),
         }
         return idx, resolved, {}
 

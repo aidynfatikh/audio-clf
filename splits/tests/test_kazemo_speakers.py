@@ -42,7 +42,7 @@ def test_three_way_split_deterministic():
     out = kazemo_three_way_split(
         rows,
         train_speakers={"a", "b"},
-        valtest_speaker="c",
+        valtest_speakers={"c"},
         valtest_ratio={"val": 0.5, "test": 0.5},
         seed=42,
     )
@@ -60,8 +60,8 @@ def test_three_way_split_deterministic():
 
 def test_three_way_split_is_seeded():
     rows = [{"speaker_id": "c"} for _ in range(100)]
-    a = kazemo_three_way_split(rows, set(), "c", {"val": 0.5, "test": 0.5}, seed=1)
-    b = kazemo_three_way_split(rows, set(), "c", {"val": 0.5, "test": 0.5}, seed=1)
+    a = kazemo_three_way_split(rows, set(), {"c"}, {"val": 0.5, "test": 0.5}, seed=1)
+    b = kazemo_three_way_split(rows, set(), {"c"}, {"val": 0.5, "test": 0.5}, seed=1)
     assert a == b
     c = kazemo_three_way_split(rows, set(), "c", {"val": 0.5, "test": 0.5}, seed=2)
     assert a != c
