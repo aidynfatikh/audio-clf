@@ -112,6 +112,7 @@ UNFREEZE_FEATURE_PROJ = bool(_ftcfg.get("unfreeze_feature_proj", False))
 TRAINING_DROP_PATH = float(_ftcfg.get("training_drop_path", 0.1))
 INIT_FROM = str(_ftcfg.get("init_from", "") or "")
 ANALYZE_ONLY = "--analyze" in sys.argv
+EARLY_STOPPING_ENABLED = bool(_tcfg.get("early_stopping", False))
 EARLY_STOPPING_PATIENCE = int(_tcfg["early_stopping_patience"])
 
 _RT = CFG["runtime"]
@@ -374,7 +375,7 @@ def main() -> None:
         )
         for name, split in named_val_splits.items()
     }
-    _primary_val = next(iter(val_loaders))
+    # Per-corpus val (batch01/batch02/kazemo); best-model tracks the macro-average.
 
     _cls_w: dict[str, torch.Tensor] | None = None
     if CLASS_WEIGHTING == "balanced":
@@ -480,7 +481,7 @@ def main() -> None:
             'train/acc_age': float(train_metrics['age_acc']),
         }
         for _name, _vloader in val_loaders.items():
-            _prefix = "val" if _name == "val" else f"val_{_name}"
+            _prefix = f"val_{_name}"
             _tasks = named_val_tasks.get(_name, _ALL_TASKS)
             _vm = filter_val_metrics(validate(
                 model, _vloader, criterion_emotion, criterion_gender,
@@ -505,12 +506,15 @@ def main() -> None:
             if "age" in _tasks:
                 _acc_line += f"  Age: {_vm['age_acc']:.4f}"
             print(_acc_line)
+        _vals = list(all_val_metrics.values())
+        _macro_total = sum(m["total"] for m in _vals) / max(len(_vals), 1)
+        val_metrics = {"total": _macro_total}
+        wandb_epoch_data['val_macro/loss_total'] = float(_macro_total)
+        print(f"Val [macro] Loss: {_macro_total:.4f}  (average of {len(_vals)} corpus splits)")
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if _utils_misc.stop_requested:
             break
-
-        val_metrics = all_val_metrics[_primary_val]  # primary split drives early stopping / best model
 
         def lp(w):
             return [round(x, 6) for x in torch.softmax(w, dim=0).detach().cpu().tolist()]
@@ -526,8 +530,8 @@ def main() -> None:
             },
         }
         for _name, _vm in all_val_metrics.items():
-            _key = "val" if _name == "val" else f"val_{_name}"
-            epoch_record[_key] = {k: round(float(v), 6) for k, v in _vm.items()}
+            epoch_record[f"val_{_name}"] = {k: round(float(v), 6) for k, v in _vm.items()}
+        epoch_record["val_macro"] = {"total": round(float(_macro_total), 6)}
         all_metrics.append(epoch_record)
         with open(metrics_path, "w") as f:
             json.dump(all_metrics, f, indent=2)
@@ -551,7 +555,7 @@ def main() -> None:
             print(f"  ✓ New best val loss: {train_state['best_val_loss']:.4f} → saved to {best_model_path.name}")
         else:
             epochs_without_improvement += 1
-            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+            if EARLY_STOPPING_ENABLED and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
                 print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
                 break
 
@@ -580,12 +584,16 @@ def main() -> None:
 
     if not _utils_misc.stop_requested and composition.get("mode") == "split_manifest":
         try:
-            from splits.materialize import materialize_split
-            _splits_map = materialize_split(Path(composition["manifest_dir"]))
-            _test_split = _splits_map.get("test")
+            from splits.materialize import materialize_named_test
+            _test_per_corpus = materialize_named_test(Path(composition["manifest_dir"]))
+            _test_tasks = {n: set(_ALL_TASKS) for n in _test_per_corpus}
+            if "kazemo" in _test_tasks:
+                from utils.training import _KAZEMO_TASKS
+                _test_tasks["kazemo"] = set(_KAZEMO_TASKS)
             evaluate_and_save_test_results(
                 model=model,
-                test_split=_test_split,
+                test_splits=_test_per_corpus,
+                test_tasks=_test_tasks,
                 processor=processor,
                 emotion_encoder=emotion_encoder,
                 gender_encoder=gender_encoder,
@@ -605,6 +613,7 @@ def main() -> None:
                 out_path=FINETUNE_DIR / "test_results_finetune.json",
                 best_ckpt_path=best_model_path,
                 label="stage2",
+                wandb_run=wandb_run,
             )
         except Exception as e:
             print(f"[stage2] Test eval failed: {e}")

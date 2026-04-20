@@ -276,7 +276,8 @@ def validate(
 def evaluate_and_save_test_results(
     *,
     model,
-    test_split,
+    test_splits: dict,
+    test_tasks: dict | None = None,
     processor,
     emotion_encoder,
     gender_encoder,
@@ -296,19 +297,26 @@ def evaluate_and_save_test_results(
     out_path: Path,
     best_ckpt_path: Path | None = None,
     label: str = "test",
+    wandb_run=None,
 ) -> dict:
-    """Evaluate *model* on *test_split* and write metrics to *out_path* (JSON).
+    """Per-corpus test eval: runs ``model`` on each split in *test_splits* and
+    writes a single JSON (``out_path``) with per-corpus metrics plus a macro
+    average. Also logs per-corpus metrics to wandb if *wandb_run* is given.
 
-    If *best_ckpt_path* is given and exists, its ``model_state_dict`` is loaded
-    into *model* before eval so the reported metrics reflect the best model
-    rather than whatever weights were left at the end of training.
+    *test_splits* is ``{corpus_name: hf_dataset}`` — e.g.
+    ``{"batch01": ds1, "batch02": ds2, "kazemo": dsk}``. Empty/missing splits
+    are skipped. *test_tasks* restricts tasks per corpus (e.g. kazemo →
+    emotion-only); defaults to all tasks when unset.
+
+    If *best_ckpt_path* is given it's loaded before eval so metrics reflect
+    the best model, not whatever weights were last on the GPU.
     """
     from torch.utils.data import DataLoader
 
     from utils.data import AudioDataset
 
-    if test_split is None or len(test_split) == 0:
-        print(f"[{label}] Skipping test eval — empty/missing test split.")
+    if not test_splits:
+        print(f"[{label}] Skipping test eval — no corpora to evaluate.")
         return {}
 
     if best_ckpt_path is not None and Path(best_ckpt_path).exists():
@@ -316,36 +324,61 @@ def evaluate_and_save_test_results(
         unwrap(model).load_state_dict(ckpt["model_state_dict"])
         print(f"[{label}] Loaded best checkpoint: {best_ckpt_path}")
 
-    test_ds = AudioDataset(
-        test_split, processor, emotion_encoder, gender_encoder, age_encoder,
-        is_train=False, noise_dir=None,
-    )
-    test_loader = DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=pin_memory,
-        persistent_workers=persistent_workers, prefetch_factor=prefetch_factor,
-    )
-    metrics = validate(
-        model, test_loader, criterion_emotion, criterion_gender, criterion_age,
-        device,
-        emotion_weight=emotion_weight,
-        gender_weight=gender_weight,
-        age_weight=age_weight,
+    test_tasks = test_tasks or {}
+    per_corpus: dict[str, dict] = {}
+    wandb_payload: dict = {}
+    for name, split in test_splits.items():
+        if split is None or len(split) == 0:
+            continue
+        tasks = set(test_tasks.get(name, _ALL_TASKS))
+        ds = AudioDataset(
+            split, processor, emotion_encoder, gender_encoder, age_encoder,
+            is_train=False, noise_dir=None,
+        )
+        loader = DataLoader(
+            ds, batch_size=batch_size, shuffle=False,
+            num_workers=num_workers, pin_memory=pin_memory,
+            persistent_workers=persistent_workers, prefetch_factor=prefetch_factor,
+        )
+        raw = validate(
+            model, loader, criterion_emotion, criterion_gender, criterion_age, device,
+            emotion_weight=emotion_weight, gender_weight=gender_weight, age_weight=age_weight,
+        )
+        metrics = filter_val_metrics(raw, tasks)
+        per_corpus[name] = {
+            "num_samples": len(split),
+            "tasks": sorted(tasks),
+            "metrics": {k: round(float(v), 6) for k, v in metrics.items()},
+        }
+        print(
+            f"[{label}:test_{name}] n={len(split)}  total={metrics['total']:.4f}  "
+            f"emotion_acc={metrics['emotion_acc']:.4f}"
+            + (f"  gender_acc={metrics['gender_acc']:.4f}" if 'gender_acc' in metrics else "")
+            + (f"  age_acc={metrics['age_acc']:.4f}" if 'age_acc' in metrics else "")
+        )
+        for k, v in metrics.items():
+            wk = _VAL_METRIC_TO_WANDB.get(k, k)
+            wandb_payload[f"test_{name}/{wk}"] = float(v)
+
+    macro_total = (
+        sum(c["metrics"]["total"] for c in per_corpus.values()) / len(per_corpus)
+        if per_corpus else None
     )
     record = {
         "label": label,
-        "num_samples": len(test_split),
         "best_ckpt": str(best_ckpt_path) if best_ckpt_path else None,
-        "metrics": {k: round(float(v), 6) for k, v in metrics.items()},
+        "per_corpus": per_corpus,
+        "macro_total": round(float(macro_total), 6) if macro_total is not None else None,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(record, f, indent=2)
-    print(
-        f"[{label}] Test results → {out_path}: "
-        f"total={metrics['total']:.4f}  emotion_acc={metrics['emotion_acc']:.4f}  "
-        f"gender_acc={metrics['gender_acc']:.4f}  age_acc={metrics['age_acc']:.4f}"
-    )
+    print(f"[{label}] Test results → {out_path}  macro_total={macro_total}")
+
+    if wandb_run is not None and wandb_payload:
+        if macro_total is not None:
+            wandb_payload["test_macro/loss_total"] = float(macro_total)
+        wandb_run.log(wandb_payload)
     return record
 
 
@@ -472,7 +505,7 @@ def make_batch_end_handler(
             step_record: dict = {"global_step": global_step, "epoch": payload["epoch"] + 1}
             wandb_data: dict = {}
             for _name, _vloader in val_loaders.items():
-                _prefix = "val" if _name == "val" else f"val_{_name}"
+                _prefix = f"val_{_name}"
                 _tasks = val_tasks.get(_name, _ALL_TASKS)
                 _sv = filter_val_metrics(
                     validate(

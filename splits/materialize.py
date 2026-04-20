@@ -164,21 +164,22 @@ def materialize_split(split_dir: Path) -> dict[str, Dataset]:
     return out
 
 
-def materialize_named_val(split_dir: Path) -> dict[str, Dataset]:
-    """Split val.parquet by dataset into named sub-splits for masked eval.
+def _materialize_per_corpus(split_dir: Path, split_name: str) -> dict[str, Dataset]:
+    """Slice a named manifest split (val or test) per-corpus.
 
-    Matches the existing pattern in multihead/utils.py:
-      - 'val': batch01 + batch02 val rows (full task set)
-      - 'kazemo': kazemo val rows (emotion-only)
+    Returns ``{"batch01": ds, "batch02": ds, "kazemo": ds}`` — only includes
+    corpora that have at least one row in this split. Used for per-corpus
+    reporting so e.g. batch01 vs batch02 accuracy can be compared apples-to-
+    apples (concatenating them hides per-distribution quality differences).
     """
     split_dir = Path(split_dir)
     cfg = _read_split_config(split_dir)
     corpora_cfg = cfg.get("corpora", {}) or {}
     manifests = read_manifests(split_dir)
 
-    val_rows = manifests.get(SPLIT_VAL, [])
+    rows = manifests.get(split_name, [])
     per_ds: dict[str, list[int]] = defaultdict(list)
-    for r in val_rows:
+    for r in rows:
         per_ds[r["dataset"]].append(int(r["source_index"]))
 
     datasets_used = sorted(per_ds.keys())
@@ -197,23 +198,22 @@ def materialize_named_val(split_dir: Path) -> dict[str, Dataset]:
             break
 
     named: dict[str, Dataset] = {}
-    # "val" = batch01 + batch02 concatenation (full tasks)
-    main_parts: list[Dataset] = []
-    for ds in (DATASET_BATCH01, DATASET_BATCH02):
+    for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO):
         if ds in sources and per_ds[ds]:
             sliced = _slice_by_source_index(sources[ds], per_ds[ds])
-            main_parts.append(_ensure_labels_and_cast(sliced, reference=ref))
-    if main_parts:
-        named["val"] = concatenate_datasets(main_parts) if len(main_parts) > 1 else main_parts[0]
-    else:
-        if ref is not None:
-            named["val"] = _ensure_labels_and_cast(ref.select([]), reference=ref)
-
-    if DATASET_KAZEMO in sources and per_ds[DATASET_KAZEMO]:
-        sliced = _slice_by_source_index(sources[DATASET_KAZEMO], per_ds[DATASET_KAZEMO])
-        named["kazemo"] = _ensure_labels_and_cast(sliced, reference=ref)
-
+            named[ds] = _ensure_labels_and_cast(sliced, reference=ref)
     return named
+
+
+def materialize_named_val(split_dir: Path) -> dict[str, Dataset]:
+    """Per-corpus val slices: ``{"batch01", "batch02", "kazemo"}`` (present-only)."""
+    return _materialize_per_corpus(split_dir, SPLIT_VAL)
+
+
+def materialize_named_test(split_dir: Path) -> dict[str, Dataset]:
+    """Per-corpus test slices: ``{"batch01", "batch02", "kazemo"}`` (present-only)."""
+    from splits.schema import SPLIT_TEST
+    return _materialize_per_corpus(split_dir, SPLIT_TEST)
 
 
 def load_split_as_hf_dataset(split_dir: Path) -> DatasetDict:

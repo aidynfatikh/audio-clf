@@ -11,6 +11,7 @@ training:
   gender_weight: 1.0
   age_weight: 1.0
   grad_clip_norm: 1.0
+  early_stopping: false          # if true, stop after `early_stopping_patience` epochs without val improvement
   early_stopping_patience: 20
   label_smoothing: 0.1
   # balanced = sklearn 'balanced' weights (w_i = N / (K * n_i)); equalises each
