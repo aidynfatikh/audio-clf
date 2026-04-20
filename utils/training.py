@@ -300,8 +300,8 @@ def evaluate_and_save_test_results(
     wandb_run=None,
 ) -> dict:
     """Per-corpus test eval: runs ``model`` on each split in *test_splits* and
-    writes a single JSON (``out_path``) with per-corpus metrics plus a macro
-    average. Also logs per-corpus metrics to wandb if *wandb_run* is given.
+    writes a single JSON (``out_path``) with per-corpus metrics. Also logs
+    per-corpus metrics to wandb if *wandb_run* is given.
 
     *test_splits* is ``{corpus_name: hf_dataset}`` — e.g.
     ``{"batch01": ds1, "batch02": ds2, "kazemo": dsk}``. Empty/missing splits
@@ -360,24 +360,17 @@ def evaluate_and_save_test_results(
             wk = _VAL_METRIC_TO_WANDB.get(k, k)
             wandb_payload[f"test_{name}/{wk}"] = float(v)
 
-    macro_total = (
-        sum(c["metrics"]["total"] for c in per_corpus.values()) / len(per_corpus)
-        if per_corpus else None
-    )
     record = {
         "label": label,
         "best_ckpt": str(best_ckpt_path) if best_ckpt_path else None,
         "per_corpus": per_corpus,
-        "macro_total": round(float(macro_total), 6) if macro_total is not None else None,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(record, f, indent=2)
-    print(f"[{label}] Test results → {out_path}  macro_total={macro_total}")
+    print(f"[{label}] Test results → {out_path}")
 
     if wandb_run is not None and wandb_payload:
-        if macro_total is not None:
-            wandb_payload["test_macro/loss_total"] = float(macro_total)
         wandb_run.log(wandb_payload)
     return record
 

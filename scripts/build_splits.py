@@ -2,7 +2,7 @@
 """Build parquet split manifests from a YAML config.
 
 Usage:
-  python scripts/build_splits.py --config configs/splits/batch01_only.yaml [--force]
+  python scripts/build_splits.py --config configs/splits/batch01_only_aug.yaml [--force]
 """
 
 from __future__ import annotations

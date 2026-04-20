@@ -1,0 +1,27 @@
+name: batch01_only_noaug_v1
+seed: 42
+speaker_disjoint: true
+stratify_by: emotion
+output_dir: splits
+
+corpora:
+  batch01:
+    mode: split
+    hf_id: 01gumano1d/batch01-validation-test
+    hf_split: train
+    cache_dir: data/batch01-validation-test
+    ratios: {train: 0.70, val: 0.15, test: 0.15}
+    speaker_column: speaker_id
+    augmented_policy: drop_all   # Exp 3: no augmentation anywhere
+
+  batch02:
+    mode: "off"
+
+  kazemo:
+    mode: "off"
+
+checks:
+  fail_on_speaker_overlap: true
+  fail_on_row_overlap: true
+  max_ratio_drift_pp: 5
+  min_samples_per_emotion_per_split: 10

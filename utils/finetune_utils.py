@@ -98,6 +98,33 @@ def rank_transformer_layers(layer_prefs: dict[str, list[float]]) -> list[int]:
     return [enc_idx for enc_idx, _ in avg]
 
 
+def select_contiguous_top_n(
+    layer_prefs: dict[str, list[float]],
+    n: int,
+    total_layers: int = NUM_TRANSFORMER_LAYERS,
+) -> list[int]:
+    """Pick the contiguous window of `n` encoder layers with the highest summed importance.
+
+    Avoids gaps in the unfrozen region so gradient flow through the backbone stays unbroken.
+    """
+    if n <= 0:
+        return []
+    n = min(n, total_layers)
+    tasks = list(layer_prefs.keys())
+    scores = []
+    for enc_idx in range(total_layers):
+        hidden_idx = enc_idx + 1
+        scores.append(sum(layer_prefs[t][hidden_idx] for t in tasks) / max(len(tasks), 1))
+
+    best_start, best_sum = 0, float("-inf")
+    for start in range(total_layers - n + 1):
+        s = sum(scores[start : start + n])
+        if s > best_sum:
+            best_sum = s
+            best_start = start
+    return list(range(best_start, best_start + n))
+
+
 def print_layer_analysis(layer_prefs: dict[str, list[float]], ranked: list[int]) -> None:
     """Pretty-print the layer importance analysis."""
     print("\n" + "=" * 60)
@@ -169,6 +196,7 @@ def build_optimizer(
     backbone_lr_top: float,
     layer_decay: float,
     head_lr: float,
+    weight_decay: float = 0.01,
 ) -> optim.Optimizer:
     """Discriminative-LR AdamW for unfrozen layers + heads."""
     param_groups: list[dict] = []
@@ -201,9 +229,9 @@ def build_optimizer(
 
     _fused = torch.cuda.is_available()
     try:
-        return optim.AdamW(param_groups, weight_decay=0.01, fused=_fused)
+        return optim.AdamW(param_groups, weight_decay=weight_decay, fused=_fused)
     except (TypeError, RuntimeError):
-        return optim.AdamW(param_groups, weight_decay=0.01)
+        return optim.AdamW(param_groups, weight_decay=weight_decay)
 
 
 def print_lr_schedule(layer_indices: list[int], backbone_lr_top: float, layer_decay: float, head_lr: float) -> None:

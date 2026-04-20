@@ -1,0 +1,29 @@
+name: batch01_only_aug_v1
+seed: 42
+speaker_disjoint: true
+stratify_by: emotion
+output_dir: splits
+
+corpora:
+  batch01:
+    mode: split
+    hf_id: 01gumano1d/batch01-validation-test
+    hf_split: train
+    cache_dir: data/batch01-validation-test
+    ratios: {train: 0.70, val: 0.15, test: 0.15}
+    speaker_column: speaker_id
+    # train_val_only: aug siblings of train/val parents stay with their parent,
+    # aug siblings of test parents are dropped. Test = non-aug reals only.
+    augmented_policy: train_val_only
+
+  batch02:
+    mode: "off"
+
+  kazemo:
+    mode: "off"
+
+checks:
+  fail_on_speaker_overlap: true
+  fail_on_row_overlap: true
+  max_ratio_drift_pp: 5
+  min_samples_per_emotion_per_split: 10

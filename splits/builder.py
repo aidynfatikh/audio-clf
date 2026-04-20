@@ -86,6 +86,61 @@ def _check_speaker_disjoint(assignments: dict[str, list[NormalizedRow]]) -> list
     return leaked
 
 
+_ALLOWED_AUG_SPLITS = {
+    "drop_all": set(),
+    "train_only": {SPLIT_TRAIN},
+    "train_val_only": {SPLIT_TRAIN, SPLIT_VAL},
+    "keep_all": {SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST},
+}
+
+
+def _compute_leak_check(
+    assignments: dict[str, list[NormalizedRow]],
+    corpora_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify every aug row sits in a split its per-dataset policy permits.
+
+    Returns per-split and per-corpus aug counts plus a boolean `passed`.
+    `passed=False` means a real sample's augmented sibling landed in a split
+    the policy forbids — unsafe manifests, caller should abort.
+    """
+    # Resolve per-dataset allowed splits from configured aug policy.
+    ds_allowed: dict[str, set[str]] = {}
+    for ds, ds_cfg in (corpora_cfg or {}).items():
+        ds_cfg = ds_cfg or {}
+        try:
+            pol = _resolve_aug_policy(ds_cfg)
+        except Exception:
+            pol = "drop_all"
+        ds_allowed[ds] = _ALLOWED_AUG_SPLITS.get(pol, set())
+
+    per_split_aug: dict[str, int] = {s: 0 for s in ALL_SPLITS}
+    per_corpus_aug: dict[str, dict[str, int]] = {}
+    violations: list[str] = []
+    for split, rows in assignments.items():
+        for r in rows:
+            if r.get("augmented") is not True:
+                continue
+            ds = r["dataset"]
+            per_split_aug[split] += 1
+            bucket = per_corpus_aug.setdefault(ds, {s: 0 for s in ALL_SPLITS})
+            bucket[split] += 1
+            allowed = ds_allowed.get(ds, {SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST})
+            if split not in allowed:
+                violations.append(f"{ds}:{split}:{r.get('row_id')}")
+
+    return {
+        "passed": not violations,
+        "per_split_aug_count": per_split_aug,
+        "per_corpus_aug_count": per_corpus_aug,
+        "policy_per_corpus": {
+            ds: sorted(splits) for ds, splits in ds_allowed.items()
+        },
+        "violations": violations[:20],
+        "total_violations": len(violations),
+    }
+
+
 def _check_row_id_disjoint(assignments: dict[str, list[NormalizedRow]]) -> list[tuple[str, str]]:
     seen: dict[tuple[str, str], str] = {}
     dupes: list[tuple[str, str]] = []
@@ -237,43 +292,87 @@ def _split_corpus(
     }
 
     drop_stats: dict[str, int] = {"augmented_policy": policy}
-    if policy == "train_only" and aug_idx:
-        train_spk = {
-            rows[i].get("speaker_id") for i in idx[SPLIT_TRAIN] if rows[i].get("speaker_id")
-        }
-        val_test_spk = {
-            rows[i].get("speaker_id")
-            for split in (SPLIT_VAL, SPLIT_TEST)
-            for i in idx[split]
-            if rows[i].get("speaker_id")
-        }
-        kept, leaked, unattributed = 0, 0, 0
-        for i in aug_idx:
-            spk = rows[i].get("speaker_id")
-            if spk is None:
-                # Can't prove no leakage — drop rather than risk polluting train.
-                unattributed += 1
-                continue
-            if spk in train_spk or spk not in val_test_spk:
-                idx[SPLIT_TRAIN].append(i)
-                kept += 1
-            else:
-                leaked += 1
-        print(
-            f"[builder] {name}: augmented_policy=train_only — "
-            f"added {kept} aug rows to train, dropped {leaked} with val/test speaker, "
-            f"dropped {unattributed} with unknown speaker"
+    if policy in ("train_only", "train_val_only") and aug_idx:
+        allowed = {SPLIT_TRAIN} if policy == "train_only" else {SPLIT_TRAIN, SPLIT_VAL}
+        route_stats = _route_augmented_rows(
+            name, rows, aug_idx, idx, allowed_splits=allowed, policy=policy,
         )
-        drop_stats.update(
-            aug_added_to_train=kept,
-            aug_dropped_val_test_speaker=leaked,
-            aug_dropped_unknown_speaker=unattributed,
-        )
+        drop_stats.update(route_stats)
     elif policy == "drop_all":
         # Rows with augmented=True were already filtered at source.
         drop_stats["note"] = "aug rows filtered at source"
 
     return idx, None, drop_stats
+
+
+def _route_augmented_rows(
+    name: str,
+    rows: list[NormalizedRow],
+    aug_idx: list[int],
+    idx: dict[str, list[int]],
+    *,
+    allowed_splits: set[str],
+    policy: str,
+) -> dict[str, int]:
+    """Route augmented rows to the split their parent-group-key landed in.
+
+    An aug row's group key (stored as `speaker_id` on NormalizedRow — this is a
+    speaker for batch01 and a source_recording for batch02) is looked up
+    against the non-aug assignment. If that split is in `allowed_splits` the
+    aug row goes there; otherwise it is dropped. Rows with no group key are
+    dropped as unattributed (we can't prove they don't leak).
+
+    Guarantees no aug sibling of a row in a disallowed split ever appears in
+    any kept split — i.e. if test is disallowed, no aug copy of a test sample
+    can be in train or val.
+    """
+    # group_key → split lookup built from the non-aug assignment.
+    group_to_split: dict[str, str] = {}
+    for split in (SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST):
+        for i in idx[split]:
+            gk = rows[i].get("speaker_id")
+            if gk:
+                group_to_split[gk] = split
+
+    added_per_split: dict[str, int] = {s: 0 for s in (SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST)}
+    unknown_group = 0
+    dropped_disallowed = 0
+    for i in aug_idx:
+        gk = rows[i].get("speaker_id")
+        if gk is None:
+            unknown_group += 1
+            continue
+        target = group_to_split.get(gk)
+        if target is None:
+            # Group key never appeared in non-aug splits → parent was dropped
+            # (e.g. emotion missing). Route to train if train is allowed, else drop.
+            if SPLIT_TRAIN in allowed_splits:
+                idx[SPLIT_TRAIN].append(i)
+                added_per_split[SPLIT_TRAIN] += 1
+            else:
+                dropped_disallowed += 1
+            continue
+        if target in allowed_splits:
+            idx[target].append(i)
+            added_per_split[target] += 1
+        else:
+            dropped_disallowed += 1
+
+    print(
+        f"[builder] {name}: augmented_policy={policy} — "
+        f"added {added_per_split[SPLIT_TRAIN]} to train, "
+        f"{added_per_split[SPLIT_VAL]} to val, "
+        f"{added_per_split[SPLIT_TEST]} to test; "
+        f"dropped {dropped_disallowed} with disallowed-split parent, "
+        f"{unknown_group} with unknown group key"
+    )
+    return {
+        "aug_added_to_train": added_per_split[SPLIT_TRAIN],
+        "aug_added_to_val": added_per_split[SPLIT_VAL],
+        "aug_added_to_test": added_per_split[SPLIT_TEST],
+        "aug_dropped_disallowed_split": dropped_disallowed,
+        "aug_dropped_unknown_group": unknown_group,
+    }
 
 
 def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
@@ -392,6 +491,17 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
             "reasons": reasons,
         }
 
+    # 4b) Aug leak check — derive policy per dataset and verify no aug sibling
+    # of a disallowed-split parent slipped through. `speaker_id` on
+    # NormalizedRow doubles as the parent-group key (actual speaker for
+    # batch01 / source_recording for batch02). Fails loudly if any aug row
+    # sits in a split not permitted by its per-dataset policy.
+    leak_check = _compute_leak_check(assignments, corpora)
+    if not leak_check["passed"]:
+        msg = f"aug leak detected: {leak_check}"
+        errors.append(msg)
+        print(f"[builder][error] {msg}")
+
     # 5) Write parquet + summary.json
     paths = write_manifests(split_dir, assignments)
     summary = build_summary(
@@ -406,6 +516,7 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
             if min_emo > 0
             else [],
             "dropped_rows": dropped_rows,
+            "leak_check": leak_check,
         },
     )
     write_summary(split_dir, summary)

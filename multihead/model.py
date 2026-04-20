@@ -102,23 +102,6 @@ class MultiTaskBackbone(nn.Module):
             nn.Linear(256, num_ages),
         )
 
-        # Accept legacy checkpoints saved when the backbone attribute was called `hubert`.
-        self._register_load_state_dict_pre_hook(self._legacy_key_remap, with_module=False)
-
-    @staticmethod
-    def _legacy_key_remap(state_dict, prefix, local_metadata, strict,
-                          missing_keys, unexpected_keys, error_msgs):
-        legacy_prefix = f"{prefix}hubert."
-        new_prefix = f"{prefix}backbone."
-        remap = [k for k in state_dict if k.startswith(legacy_prefix)]
-        for k in remap:
-            state_dict[new_prefix + k[len(legacy_prefix):]] = state_dict.pop(k)
-
-    # BC alias: some external code/tooling may still look up `.hubert`.
-    @property
-    def hubert(self):
-        return self.backbone
-
     def forward(self, input_values, attention_mask=None):
         outputs = self.backbone(input_values, attention_mask=attention_mask)
 

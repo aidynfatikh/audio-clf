@@ -87,6 +87,16 @@ CLASS_WEIGHTING = str(_tcfg.get("class_weighting", "none")).strip().lower()
 WEIGHT_DECAY = float(_tcfg.get("weight_decay", 0.01))
 _SCHED = _tcfg.get("scheduler", {})
 
+# When the backbone is *not* frozen we build a discriminative-LR optimizer
+# over every backbone layer + the heads (full-finetune-from-epoch-0 regime).
+# `finetune` block keys mirror multihead/finetune.py so a single helper can be
+# reused. Fall back to sensible defaults if keys are absent.
+_ftcfg_s1 = CFG.get("finetune", {}) or {}
+FULL_FT_BACKBONE_LR_TOP = float(_ftcfg_s1.get("backbone_lr_top", 1.0e-5))
+FULL_FT_LAYER_DECAY = float(_ftcfg_s1.get("layer_decay", 0.85))
+FULL_FT_UNFREEZE_FEATURE_PROJ = bool(_ftcfg_s1.get("unfreeze_feature_proj", False))
+FULL_FT_TRAINING_DROP_PATH = float(_ftcfg_s1.get("training_drop_path", 0.1))
+
 _RT = CFG["runtime"]
 NUM_CHECKPOINTS = _RT["num_checkpoints"]
 CHECKPOINT_EVERY_STEPS = _RT["checkpoint_every_steps"]
@@ -200,8 +210,8 @@ def main():
         )
         for name, split in named_val_splits.items()
     }
-    # Per-corpus val (batch01/batch02/kazemo) for fair, apples-to-apples reporting.
-    # Best-model / early-stopping tracks the macro-average of per-corpus total loss.
+    # Per-corpus val (batch01/batch02/kazemo). Best-model / early-stopping
+    # tracks the sum of per-corpus val totals — no extra metric is stored.
 
     print("Initializing model...")
     print(f"  Backbone: {_backbone_name} ({_pretrained})")
@@ -223,14 +233,48 @@ def main():
         [model.emotion_weights, model.gender_weights, model.age_weights]
     )
 
+    # Config-driven regime: freeze_backbone=true → heads-only (stage-1 frozen).
+    # freeze_backbone=false → full-finetune from epoch 0 with discriminative LR.
+    # No experiment-specific code — the YAML alone selects the path.
+    _freeze_backbone = bool(_mcfg.get("freeze_backbone", True))
     _fused_opt = DEVICE.type == 'cuda'
-    try:
-        optimizer = optim.AdamW([{'params': head_params, 'lr': HEAD_LEARNING_RATE}], weight_decay=WEIGHT_DECAY, fused=_fused_opt)
-        if _fused_opt:
-            print("  Optimizer: fused AdamW")
-    except (TypeError, RuntimeError):
-        optimizer = optim.AdamW([{'params': head_params, 'lr': HEAD_LEARNING_RATE}], weight_decay=WEIGHT_DECAY)
-        print("  Optimizer: standard AdamW (fused not available)")
+    if _freeze_backbone:
+        try:
+            optimizer = optim.AdamW([{'params': head_params, 'lr': HEAD_LEARNING_RATE}], weight_decay=WEIGHT_DECAY, fused=_fused_opt)
+            if _fused_opt:
+                print("  Optimizer: fused AdamW (heads-only, frozen backbone)")
+        except (TypeError, RuntimeError):
+            optimizer = optim.AdamW([{'params': head_params, 'lr': HEAD_LEARNING_RATE}], weight_decay=WEIGHT_DECAY)
+            print("  Optimizer: standard AdamW (fused not available)")
+    else:
+        # Full-finetune: unfreeze every encoder layer and build a discriminative
+        # LR optimizer via the existing helper (same one used in stage-2).
+        for p in model.backbone.parameters():
+            p.requires_grad = True
+        if hasattr(model.backbone.config, 'training_drop_path'):
+            model.backbone.config.training_drop_path = FULL_FT_TRAINING_DROP_PATH
+        n_layers = int(unwrap(model).backbone.config.num_hidden_layers)
+        from utils.finetune_utils import (
+            build_optimizer as _ft_build_optimizer,
+            describe_frozen_state,
+            print_lr_schedule,
+        )
+        layer_indices = list(range(n_layers))
+        print(f"  Full-finetune regime: unfreezing all {n_layers} encoder layers "
+              f"+ feature_projection={FULL_FT_UNFREEZE_FEATURE_PROJ}")
+        if FULL_FT_UNFREEZE_FEATURE_PROJ:
+            for p in model.backbone.feature_projection.parameters():
+                p.requires_grad = True
+        describe_frozen_state(model)
+        print_lr_schedule(layer_indices, FULL_FT_BACKBONE_LR_TOP, FULL_FT_LAYER_DECAY, HEAD_LEARNING_RATE)
+        optimizer = _ft_build_optimizer(
+            model,
+            layer_indices=layer_indices,
+            backbone_lr_top=FULL_FT_BACKBONE_LR_TOP,
+            layer_decay=FULL_FT_LAYER_DECAY,
+            head_lr=HEAD_LEARNING_RATE,
+            weight_decay=WEIGHT_DECAY,
+        )
 
     scheduler = make_cosine_schedule(
         optimizer,
@@ -443,13 +487,9 @@ def main():
             if "age" in _tasks:
                 _acc_line += f"  Age: {_vm['age_acc']:.4f}"
             print(_acc_line)
-        # Macro-average over per-corpus val splits — drives best-model / early-stopping
-        # so one corpus doesn't dominate by sheer row count.
-        _vals = list(all_val_metrics.values())
-        _macro_total = sum(m["total"] for m in _vals) / max(len(_vals), 1)
-        val_metrics = {"total": _macro_total}
-        wandb_epoch_data['val_macro/loss_total'] = float(_macro_total)
-        print(f"Val [macro] Loss: {_macro_total:.4f}  (average of {len(_vals)} corpus splits)")
+        # Sum of per-corpus val totals drives best-model / early-stopping.
+        # Not logged as a metric — only per-corpus val losses are stored.
+        val_metrics = {"total": sum(m["total"] for m in all_val_metrics.values())}
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if _utils_misc.stop_requested:
@@ -469,7 +509,6 @@ def main():
         }
         for _name, _vm in all_val_metrics.items():
             epoch_record[f"val_{_name}"] = {k: round(float(v), 6) for k, v in _vm.items()}
-        epoch_record["val_macro"] = {"total": round(float(_macro_total), 6)}
         all_metrics.append(epoch_record)
         with open(metrics_path, "w") as f:
             json.dump(all_metrics, f, indent=2)

@@ -216,8 +216,11 @@ def _resolve_aug_policy(cfg: dict[str, Any]) -> str:
     raw = cfg.get("augmented_policy")
     if raw:
         p = str(raw).strip().lower()
-        if p not in {"drop_all", "keep_all", "train_only"}:
-            raise ValueError(f"augmented_policy must be drop_all | keep_all | train_only, got {raw!r}")
+        if p not in {"drop_all", "keep_all", "train_only", "train_val_only"}:
+            raise ValueError(
+                "augmented_policy must be drop_all | keep_all | train_only | train_val_only, "
+                f"got {raw!r}"
+            )
         return p
     if "filter_augmented" in cfg:
         return "drop_all" if bool(cfg["filter_augmented"]) else "keep_all"

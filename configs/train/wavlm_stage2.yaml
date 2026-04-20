@@ -11,16 +11,16 @@ training:
   gender_weight: 1.0
   age_weight: 1.0
   grad_clip_norm: 1.0
-  early_stopping: false
-  early_stopping_patience: 20
+  early_stopping: true
+  early_stopping_patience: 6
   label_smoothing: 0.1
   class_weighting: balanced   # balanced | none (see hubert_stage1.yaml for details)
-  weight_decay: 0.01
+  weight_decay: 0.05          # stronger than stage1 — backbone is trainable now
   default_batch_size: 8
   scheduler:
     type: cosine
     hold_epochs: 5
-    decay_epochs: 15
+    decay_epochs: 35
     scale_group_decay: true
     group_power_lo: 0.8
     group_power_hi: 1.3
@@ -29,9 +29,10 @@ finetune:
   backbone_lr_top: 5.0e-5
   layer_decay: 0.85
   head_lr: 2.0e-4
-  unfreeze_top_n: 4
+  unfreeze_top_n: 3
+  unfreeze_contiguous: true      # pick best contiguous window — no gaps in gradient flow
   unfreeze_feature_proj: false
-  training_drop_path: 0.1
+  training_drop_path: 0.15
   init_from: ""                  # defaults to $MODEL_DIR/best_model.pt
 
 dataloader:

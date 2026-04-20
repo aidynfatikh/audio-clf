@@ -20,7 +20,7 @@ training:
   scheduler:
     type: cosine
     hold_epochs: 3
-    decay_epochs: 7
+    decay_epochs: 17
 
 dataloader:
   num_workers: 4

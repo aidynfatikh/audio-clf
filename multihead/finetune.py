@@ -61,6 +61,7 @@ from utils.finetune_utils import (
     latest_layer_prefs,
     print_layer_analysis,
     rank_transformer_layers,
+    select_contiguous_top_n,
     unfreeze_layers,
 )
 from utils.finetune_utils import print_lr_schedule as _print_lr_schedule
@@ -102,12 +103,14 @@ AGE_WEIGHT = float(_tcfg["age_weight"])
 GRAD_CLIP_NORM = float(_tcfg["grad_clip_norm"])
 LABEL_SMOOTHING = float(_tcfg.get("label_smoothing", 0.1))
 CLASS_WEIGHTING = str(_tcfg.get("class_weighting", "none")).strip().lower()
+WEIGHT_DECAY = float(_tcfg.get("weight_decay", 0.01))
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 FINETUNE_DIR = MODEL_DIR / "finetune"
 FINETUNE_DIR.mkdir(parents=True, exist_ok=True)
 
 UNFREEZE_TOP_N = int(_ftcfg.get("unfreeze_top_n", 4))
+UNFREEZE_CONTIGUOUS = bool(_ftcfg.get("unfreeze_contiguous", True))
 UNFREEZE_FEATURE_PROJ = bool(_ftcfg.get("unfreeze_feature_proj", False))
 TRAINING_DROP_PATH = float(_ftcfg.get("training_drop_path", 0.1))
 INIT_FROM = str(_ftcfg.get("init_from", "") or "")
@@ -154,8 +157,13 @@ def main() -> None:
         return
 
     print_layer_analysis(layer_prefs, ranked_layers)
-    layers_to_unfreeze = ranked_layers[:UNFREEZE_TOP_N]
-    print(f"Fine-tuning plan:")
+    if UNFREEZE_CONTIGUOUS:
+        layers_to_unfreeze = select_contiguous_top_n(layer_prefs, UNFREEZE_TOP_N)
+        _mode_label = "contiguous-best"
+    else:
+        layers_to_unfreeze = ranked_layers[:UNFREEZE_TOP_N]
+        _mode_label = "importance-ranked"
+    print(f"Fine-tuning plan ({_mode_label}):")
     print(f"  Will unfreeze top-{UNFREEZE_TOP_N} transformer layers: "
           f"encoder.layers{sorted(layers_to_unfreeze)}")
     if UNFREEZE_FEATURE_PROJ:
@@ -219,8 +227,8 @@ def main() -> None:
     _ckpt_extra = {"backbone_name": _backbone_name, "pretrained": _pretrained}
     model.load_state_dict(ckpt["model_state_dict"])
 
-    if hasattr(model.hubert.config, 'training_drop_path'):
-        model.hubert.config.training_drop_path = TRAINING_DROP_PATH
+    if hasattr(model.backbone.config, 'training_drop_path'):
+        model.backbone.config.training_drop_path = TRAINING_DROP_PATH
 
     unfreeze_layers(
         model,
@@ -232,7 +240,8 @@ def main() -> None:
 
     _print_lr_schedule(layers_to_unfreeze, BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
     optimizer = build_optimizer(model, layers_to_unfreeze,
-                                BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR)
+                                BACKBONE_LR_TOP, LAYER_DECAY, HEAD_LR,
+                                weight_decay=WEIGHT_DECAY)
     scheduler = make_cosine_schedule(
         optimizer,
         hold_epochs=int(_SCHED.get("hold_epochs", 5)),
@@ -291,7 +300,10 @@ def main() -> None:
                     'gender_weight': GENDER_WEIGHT,
                     'age_weight': AGE_WEIGHT,
                     'unfreeze_top_n': UNFREEZE_TOP_N,
+                    'unfreeze_contiguous': UNFREEZE_CONTIGUOUS,
                     'unfreeze_feature_proj': UNFREEZE_FEATURE_PROJ,
+                    'weight_decay': WEIGHT_DECAY,
+                    'training_drop_path': TRAINING_DROP_PATH,
                     'checkpoint_every_steps': CHECKPOINT_EVERY_STEPS,
                     'val_every_steps': VAL_EVERY_STEPS,
                     'layers_to_unfreeze': sorted(layers_to_unfreeze),
@@ -375,7 +387,7 @@ def main() -> None:
         )
         for name, split in named_val_splits.items()
     }
-    # Per-corpus val (batch01/batch02/kazemo); best-model tracks the macro-average.
+    # Per-corpus val (batch01/batch02/kazemo); best-model tracks the sum of per-corpus val totals.
 
     _cls_w: dict[str, torch.Tensor] | None = None
     if CLASS_WEIGHTING == "balanced":
@@ -506,11 +518,7 @@ def main() -> None:
             if "age" in _tasks:
                 _acc_line += f"  Age: {_vm['age_acc']:.4f}"
             print(_acc_line)
-        _vals = list(all_val_metrics.values())
-        _macro_total = sum(m["total"] for m in _vals) / max(len(_vals), 1)
-        val_metrics = {"total": _macro_total}
-        wandb_epoch_data['val_macro/loss_total'] = float(_macro_total)
-        print(f"Val [macro] Loss: {_macro_total:.4f}  (average of {len(_vals)} corpus splits)")
+        val_metrics = {"total": sum(m["total"] for m in all_val_metrics.values())}
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if _utils_misc.stop_requested:
@@ -531,7 +539,6 @@ def main() -> None:
         }
         for _name, _vm in all_val_metrics.items():
             epoch_record[f"val_{_name}"] = {k: round(float(v), 6) for k, v in _vm.items()}
-        epoch_record["val_macro"] = {"total": round(float(_macro_total), 6)}
         all_metrics.append(epoch_record)
         with open(metrics_path, "w") as f:
             json.dump(all_metrics, f, indent=2)

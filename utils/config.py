@@ -50,7 +50,15 @@ def load_stage_config(stage: int, backbone: str | None = None) -> dict[str, Any]
       - checkpointing overrides: CHECKPOINT_EVERY_STEPS, VAL_EVERY_STEPS, etc.
     """
     bb = (backbone or resolve_backbone()).lower()
-    path = _CONFIG_DIR / f"{bb}_stage{stage}.yaml"
+    # `TRAIN_CONFIG_NAME` lets a runner swap the config suffix without touching
+    # train.py — e.g. `TRAIN_CONFIG_NAME=full_finetune` loads
+    # `{backbone}_full_finetune.yaml`. Default behavior (stage1 / stage2) is
+    # preserved when the env var is unset.
+    _override = os.environ.get("TRAIN_CONFIG_NAME", "").strip()
+    if _override:
+        path = _CONFIG_DIR / f"{bb}_{_override}.yaml"
+    else:
+        path = _CONFIG_DIR / f"{bb}_stage{stage}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"Stage config not found: {path}")
     with open(path) as f:

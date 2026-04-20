@@ -1,4 +1,4 @@
-name: batch01_only_v1
+name: b1_b2_noaug_v1
 seed: 42
 speaker_disjoint: true
 stratify_by: emotion
@@ -11,11 +11,17 @@ corpora:
     hf_split: train
     cache_dir: data/batch01-validation-test
     ratios: {train: 0.70, val: 0.15, test: 0.15}
-    augmented_policy: train_only   # drop_all | keep_all | train_only
     speaker_column: speaker_id
+    augmented_policy: drop_all
 
   batch02:
-    mode: "off"
+    mode: split
+    hf_id: 01gumano1d/batch2-aug-clean
+    hf_split: train
+    cache_dir: data/batch2-aug-clean
+    ratios: {train: 0.90, val: 0.05, test: 0.05}
+    group_by: source_recording
+    augmented_policy: drop_all
 
   kazemo:
     mode: "off"
