@@ -5,7 +5,7 @@ model:
   use_spec_augment: false
 
 training:
-  num_epochs: 10
+  num_epochs: 20
   head_learning_rate: 1.0e-3
   emotion_weight: 1.0
   gender_weight: 1.0
