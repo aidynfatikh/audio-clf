@@ -5,14 +5,14 @@ model:
   use_spec_augment: true
 
 training:
-  num_epochs: 60               # matches Exp 1-3 compute (stage1 20 + stage2 40)
+  num_epochs: 40               # matches Exp 1-3 compute (stage1 15 + stage2 25)
   head_learning_rate: 2.0e-4
   emotion_weight: 1.0
   gender_weight: 1.0
   age_weight: 1.0
   grad_clip_norm: 1.0
   early_stopping: false        # fixed budget — no early stopping for fair comparison
-  early_stopping_patience: 60
+  early_stopping_patience: 40
   label_smoothing: 0.1
   class_weighting: balanced
   weight_decay: 0.05
@@ -20,7 +20,7 @@ training:
   scheduler:
     type: cosine
     hold_epochs: 3
-    decay_epochs: 57
+    decay_epochs: 37
 
 finetune:
   backbone_lr_top: 1.0e-5

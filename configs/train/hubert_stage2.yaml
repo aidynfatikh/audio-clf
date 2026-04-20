@@ -5,7 +5,7 @@ model:
   use_spec_augment: true
 
 training:
-  num_epochs: 40
+  num_epochs: 25
   head_learning_rate: 2.0e-4     # only used if finetune block absent
   emotion_weight: 1.0
   gender_weight: 1.0
@@ -19,8 +19,8 @@ training:
   default_batch_size: 8
   scheduler:
     type: cosine
-    hold_epochs: 5
-    decay_epochs: 35
+    hold_epochs: 3
+    decay_epochs: 22
     scale_group_decay: true
     group_power_lo: 0.8
     group_power_hi: 1.3
