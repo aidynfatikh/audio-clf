@@ -139,17 +139,18 @@ class AudioDataset(TorchDataset):
         row = self.data[idx]
         audio_data, sample_rate = read_audio(row["audio"])
 
+        if len(audio_data.shape) > 1:
+            audio_data = audio_data.mean(axis=1)
+        audio_data = audio_data.astype(np.float32, copy=False)
+
         if sample_rate != SAMPLE_RATE:
             import librosa
             audio_data = librosa.resample(
-                audio_data.astype(np.float32),
+                audio_data,
                 orig_sr=sample_rate,
                 target_sr=SAMPLE_RATE,
+                res_type="polyphase",
             )
-
-        if len(audio_data.shape) > 1:
-            audio_data = np.mean(audio_data, axis=1)
-        audio_data = audio_data.astype(np.float32, copy=False)
 
         if self.is_train:
             import random as _random

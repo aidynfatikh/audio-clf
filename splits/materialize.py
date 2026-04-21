@@ -92,6 +92,30 @@ def _canonical_features(reference: Dataset | None = None) -> Features:
     )
 
 
+# Canonical label vocab — anything outside these sets becomes None and is
+# ignored by CE (encoded as -100). Keeps label encoders pinned to the intended
+# class space regardless of which corpora are added later.
+_CANON_GENDER = {"M", "F"}
+_CANON_AGE = {"child", "young", "adult", "senior"}
+_CANON_EMOTION = {"angry", "disgusted", "fearful", "happy", "neutral", "sad", "surprised"}
+
+# Aliases observed across corpora. Extend here when adding a new source.
+_GENDER_ALIAS = {"male": "M", "m": "M", "female": "F", "f": "F"}
+_AGE_ALIAS: dict[str, str] = {}
+_EMOTION_ALIAS: dict[str, str] = {}
+
+
+def _canon_label(v: Any, canon: set[str], alias: dict[str, str]) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    if s in canon:
+        return s
+    return alias.get(s.lower())  # None if unknown
+
+
 def _ensure_labels_and_cast(split: Dataset, reference: Dataset | None = None) -> Dataset:
     needed = ("emotion", "gender", "age_category")
     missing = [c for c in needed if c not in split.column_names]
@@ -105,6 +129,14 @@ def _ensure_labels_and_cast(split: Dataset, reference: Dataset | None = None) ->
     if "audio" not in split.column_names:
         raise RuntimeError("materialize: source split is missing 'audio' column")
     split = split.select_columns(keep)
+
+    def _normalize(row):
+        row["gender"] = _canon_label(row.get("gender"), _CANON_GENDER, _GENDER_ALIAS)
+        row["age_category"] = _canon_label(row.get("age_category"), _CANON_AGE, _AGE_ALIAS)
+        row["emotion"] = _canon_label(row.get("emotion"), _CANON_EMOTION, _EMOTION_ALIAS)
+        return row
+    split = split.map(_normalize, desc="normalize_labels")
+
     target = _canonical_features(reference)
     return split.cast(target)
 
