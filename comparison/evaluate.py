@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Evaluate a speech-emotion model on the per-corpus test slices of a split dir.
+"""Evaluate a speech-emotion model on per-corpus test data.
 
-Two modes (exactly one must be given):
+Source (exactly one):
+  --split-dir <dir>    splits/<name>/ — per-corpus test slices from the builder.
+  --hf-dataset <id>    HuggingFace dataset id with ``audio`` and ``emotion``
+                       columns (single corpus). Use --max-samples to cap
+                       download via ``train[:N]`` slicing.
+
+Model (exactly one):
   --variant <id>       FunASR emotion2vec model id (e.g. iic/emotion2vec_plus_large).
                        Requires ``pip install -U funasr``.
   --checkpoint <path>  Local MultiTaskBackbone checkpoint (.pt). Label encoders
                        are loaded from a ``label_encoders.json`` next to the
                        checkpoint (falling back to its parent dir).
-
-Uses the same split manifests as training (splits/<name>/) so results line up
-with what multihead/train.py sees.
 
 Output layout:
     results/comparison/<split_name>/<model_tag>/
@@ -72,7 +75,19 @@ def _resample(wav: np.ndarray, src_sr: int) -> np.ndarray:
 
 
 def _load_row_waveform(row) -> np.ndarray:
-    wav, sr = read_audio(row["audio"])
+    audio = row["audio"]
+    # Case 1: HF dict form {array, sampling_rate} (Audio(decode=True) legacy).
+    if isinstance(audio, dict) and audio.get("array") is not None:
+        return _resample(np.asarray(audio["array"]), int(audio["sampling_rate"]))
+    # Case 2: new torchcodec AudioDecoder (HF >= 3.x default for Audio).
+    if hasattr(audio, "get_all_samples"):
+        samples = audio.get_all_samples()
+        wav = samples.data.cpu().numpy()  # shape [channels, time]
+        if wav.ndim > 1:
+            wav = wav.mean(axis=0)
+        return _resample(wav, int(samples.sample_rate))
+    # Case 3: raw bytes / local path dict (split-dir flow).
+    wav, sr = read_audio(audio)
     return _resample(wav, sr)
 
 
@@ -247,32 +262,85 @@ def _eval_corpus(
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def _checkpoint_tag(ckpt_path: Path) -> str:
-    # e.g. models/exp1-hubert-b1-b2_20260421-102709/finetune/best_model_finetuned.pt
-    # → exp1-hubert-b1-b2_20260421-102709__finetune__best_model_finetuned
+    # e.g. models/exp1-.../finetune/best_model_finetuned.pt
+    # → exp1-...__finetune__best_model_finetuned
     parts = ckpt_path.with_suffix("").parts
+    # Drop leading filesystem root ('/') and any empty segments so the tag
+    # never produces an absolute path when the ckpt is outside models/.
+    parts = tuple(p for p in parts if p and p != "/")
     if "models" in parts:
-        idx = parts.index("models")
-        parts = parts[idx + 1:]
-    return "__".join(parts)
+        parts = parts[parts.index("models") + 1:]
+    elif "results" in parts:
+        parts = parts[parts.index("results") + 1:]
+    else:
+        parts = parts[-3:]
+    return "__".join(parts) or ckpt_path.stem
+
+
+def _load_hf_dataset_as_corpus(hf_id: str, hf_split: str, max_samples: int | None):
+    """Load an HF dataset as a single corpus with 'audio' + 'emotion' columns.
+
+    Uses train[:N] slice syntax when max_samples is given so we don't pull all
+    shards. The resulting split is cast to Audio(decode=False) to match what
+    loaders.load_data.read_audio expects.
+    """
+    from datasets import Audio, load_dataset
+
+    split_spec = hf_split
+    if max_samples is not None and max_samples > 0:
+        split_spec = f"{hf_split}[:{max_samples}]"
+    ds = load_dataset(hf_id, split=split_spec)
+    if "emotion" not in ds.column_names:
+        raise SystemExit(
+            f"{hf_id} has no 'emotion' column (columns: {ds.column_names})"
+        )
+    # Keep HF's default Audio(decode=True) so we get in-memory arrays — the
+    # split-dir path uses Audio(decode=False) with local HF cache paths, but
+    # remote-only datasets store URLs that soundfile can't open directly.
+    if "audio" in ds.column_names:
+        ds = ds.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
+    return ds
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--split-dir", required=True, help="Path to splits/<name>/ dir")
-    group = ap.add_mutually_exclusive_group(required=True)
-    group.add_argument("--variant", help="FunASR model id, e.g. iic/emotion2vec_plus_large")
-    group.add_argument("--checkpoint", help="Path to our .pt checkpoint")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--split-dir", help="Path to splits/<name>/ dir (per-corpus test slices)")
+    src.add_argument("--hf-dataset", help="HuggingFace dataset id (single corpus), e.g. umutkkgz/tr-full-dataset")
+    ap.add_argument("--hf-split", default="train", help='Split name for --hf-dataset (default "train")')
+    ap.add_argument("--corpus-name", default=None,
+                    help="Corpus name used in output filenames. Default: last segment of --hf-dataset.")
+    model_group = ap.add_mutually_exclusive_group(required=True)
+    model_group.add_argument("--variant", help="FunASR model id, e.g. iic/emotion2vec_plus_large")
+    model_group.add_argument("--checkpoint", help="Path to our .pt checkpoint")
     ap.add_argument("--hub", default="hf", choices=["hf", "ms"],
                     help='Hub for --variant: "hf" or "ms". Default hf.')
-    ap.add_argument("--out", default=None, help="Output dir. Default: results/comparison/<split>/<tag>/")
+    ap.add_argument("--out", default=None, help="Output dir. Default: results/comparison/<source>/<tag>/")
     ap.add_argument("--max-samples", type=int, default=None,
-                    help="Cap per corpus (useful for quick checks).")
+                    help="Cap per corpus (useful for quick checks). For --hf-dataset also limits download via train[:N] slice.")
     ap.add_argument("--device", default=None, help="cpu|cuda (default: auto)")
     args = ap.parse_args()
 
-    split_dir = Path(args.split_dir).resolve()
-    if not (split_dir / "config.yaml").exists():
-        raise SystemExit(f"Not a split dir (no config.yaml): {split_dir}")
+    # Resolve source → (source_tag, per_corpus dict, source metadata)
+    if args.split_dir:
+        split_dir = Path(args.split_dir).resolve()
+        if not (split_dir / "config.yaml").exists():
+            raise SystemExit(f"Not a split dir (no config.yaml): {split_dir}")
+        source_tag = split_dir.name
+        per_corpus = materialize_named_test(split_dir)
+        if not per_corpus:
+            raise SystemExit(f"No test rows found in {split_dir}")
+        source_meta = {"kind": "split_dir", "split_dir": str(split_dir)}
+    else:
+        source_tag = args.hf_dataset.replace("/", "__")
+        corpus_name = args.corpus_name or args.hf_dataset.split("/")[-1]
+        ds = _load_hf_dataset_as_corpus(args.hf_dataset, args.hf_split, args.max_samples)
+        per_corpus = {corpus_name: ds}
+        source_meta = {
+            "kind": "hf_dataset",
+            "hf_dataset": args.hf_dataset,
+            "hf_split": args.hf_split,
+        }
 
     import torch
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -290,20 +358,16 @@ def main():
         model_meta = {"kind": "multitask_backbone", **meta}
 
     out_dir = Path(args.out) if args.out else (
-        REPO_ROOT / "results" / "comparison" / split_dir.name / tag
+        REPO_ROOT / "results" / "comparison" / source_tag / tag
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[cmp] model={model_meta}", flush=True)
-    print(f"[cmp] split_dir={split_dir} device={device}", flush=True)
+    print(f"[cmp] source={source_meta} device={device}", flush=True)
     print(f"[cmp] out_dir={out_dir}", flush=True)
 
-    per_corpus = materialize_named_test(split_dir)
-    if not per_corpus:
-        raise SystemExit(f"No test rows found in {split_dir}")
-
     aggregate = {
-        "split_dir": str(split_dir),
+        "source": source_meta,
         "model": model_meta,
         "per_corpus": {},
     }

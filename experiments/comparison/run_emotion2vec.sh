@@ -32,12 +32,15 @@ done
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# Use ModelScope names (iic/...) — FunASR's model registry is keyed on these.
+# emotion2vec_base_finetuned only exists on ModelScope; plus_* exist on both.
 VARIANTS=(
   "iic/emotion2vec_base_finetuned"
   "iic/emotion2vec_plus_seed"
   "iic/emotion2vec_plus_base"
   "iic/emotion2vec_plus_large"
 )
+HUB="${E2V_HUB:-ms}"
 
 EXTRA=()
 if [[ -n "$MAX_SAMPLES" ]]; then
@@ -45,10 +48,11 @@ if [[ -n "$MAX_SAMPLES" ]]; then
 fi
 
 for v in "${VARIANTS[@]}"; do
-  echo "=== variant: $v ==="
+  echo "=== variant: $v (hub=$HUB) ==="
   python comparison/evaluate.py \
     --split-dir "$SPLIT_DIR" \
     --variant "$v" \
+    --hub "$HUB" \
     "${EXTRA[@]}"
 done
 

@@ -6,7 +6,8 @@
 #
 # Used by comparison/evaluate.py and experiments/comparison/run_emotion2vec.sh.
 variants:
-  - iic/emotion2vec_base_finetuned
-  - iic/emotion2vec_plus_seed
-  - iic/emotion2vec_plus_base
-  - iic/emotion2vec_plus_large
+  # HuggingFace org IDs (default --hub=hf). For ModelScope use iic/... with --hub=ms.
+  - emotion2vec/emotion2vec_base_finetuned
+  - emotion2vec/emotion2vec_plus_seed
+  - emotion2vec/emotion2vec_plus_base
+  - emotion2vec/emotion2vec_plus_large
