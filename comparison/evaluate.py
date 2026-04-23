@@ -277,14 +277,36 @@ def _checkpoint_tag(ckpt_path: Path) -> str:
     return "__".join(parts) or ckpt_path.stem
 
 
-def _load_hf_dataset_as_corpus(hf_id: str, hf_split: str, max_samples: int | None):
+def _load_hf_dataset_as_corpus(
+    hf_id: str,
+    hf_split: str,
+    max_samples: int | None,
+    prefetch: bool = True,
+    manifest: str = "data.jsonl",
+    prefetch_workers: int = 16,
+):
     """Load an HF dataset as a single corpus with 'audio' + 'emotion' columns.
 
     Uses train[:N] slice syntax when max_samples is given so we don't pull all
-    shards. The resulting split is cast to Audio(decode=False) to match what
-    loaders.load_data.read_audio expects.
+    shards. When ``prefetch`` is set, audio files referenced by the first
+    ``max_samples`` manifest rows (or all rows if uncapped) are downloaded in
+    parallel up front so iteration hits the HF disk cache instead of fetching
+    per-row over HTTP.
     """
     from datasets import Audio, load_dataset
+
+    if prefetch:
+        from comparison.prefetch_hf import prefetch_hf_audio
+        try:
+            prefetch_hf_audio(
+                hf_id, max_samples, manifest=manifest, max_workers=prefetch_workers,
+            )
+        except Exception as e:
+            print(
+                f"[cmp] prefetch skipped ({type(e).__name__}: {e}) — "
+                "iteration will fall back to per-row HTTP fetches.",
+                flush=True,
+            )
 
     split_spec = hf_split
     if max_samples is not None and max_samples > 0:
@@ -319,6 +341,12 @@ def main():
     ap.add_argument("--max-samples", type=int, default=None,
                     help="Cap per corpus (useful for quick checks). For --hf-dataset also limits download via train[:N] slice.")
     ap.add_argument("--device", default=None, help="cpu|cuda (default: auto)")
+    ap.add_argument("--hf-manifest", default="data.jsonl",
+                    help='Manifest filename for --hf-dataset prefetch (default "data.jsonl")')
+    ap.add_argument("--prefetch-workers", type=int, default=16,
+                    help="Parallel download workers for --hf-dataset audio prefetch (default 16)")
+    ap.add_argument("--no-prefetch", action="store_true",
+                    help="Skip audio prefetch for --hf-dataset (iterate with per-row HTTP fetches)")
     args = ap.parse_args()
 
     # Resolve source → (source_tag, per_corpus dict, source metadata)
@@ -334,7 +362,12 @@ def main():
     else:
         source_tag = args.hf_dataset.replace("/", "__")
         corpus_name = args.corpus_name or args.hf_dataset.split("/")[-1]
-        ds = _load_hf_dataset_as_corpus(args.hf_dataset, args.hf_split, args.max_samples)
+        ds = _load_hf_dataset_as_corpus(
+            args.hf_dataset, args.hf_split, args.max_samples,
+            prefetch=not args.no_prefetch,
+            manifest=args.hf_manifest,
+            prefetch_workers=args.prefetch_workers,
+        )
         per_corpus = {corpus_name: ds}
         source_meta = {
             "kind": "hf_dataset",
