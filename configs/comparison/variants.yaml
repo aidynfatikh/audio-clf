@@ -1,0 +1,12 @@
+# emotion2vec model variants that output class labels (9-class head).
+# The plain "emotion2vec_base" is excluded: it only returns features, no classifier.
+#
+# Labels emitted by all variants below:
+#   angry, disgusted, fearful, happy, neutral, other, sad, surprised, unknown
+#
+# Used by comparison/evaluate.py and experiments/comparison/run_emotion2vec.sh.
+variants:
+  - iic/emotion2vec_base_finetuned
+  - iic/emotion2vec_plus_seed
+  - iic/emotion2vec_plus_base
+  - iic/emotion2vec_plus_large
