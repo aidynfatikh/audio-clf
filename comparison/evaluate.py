@@ -78,7 +78,10 @@ def _resample(wav: np.ndarray, src_sr: int) -> np.ndarray:
 
 
 def _load_row_waveform(row) -> np.ndarray:
-    wav, sr = read_audio(row["audio"])
+    audio = row["audio"]
+    if isinstance(audio, str):
+        audio = {"path": audio, "bytes": None}
+    wav, sr = read_audio(audio)
     return _resample(wav, sr)
 
 

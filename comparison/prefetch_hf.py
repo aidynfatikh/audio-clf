@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, try_to_load_from_cache
 from tqdm import tqdm
 
 
@@ -120,6 +120,11 @@ def prefetch_hf_audio(
 
     def _fetch(spec: tuple[str, str, str]) -> tuple[tuple[str, str, str], str]:
         repo, rev, path = spec
+        cached = try_to_load_from_cache(
+            repo_id=repo, repo_type="dataset", filename=path, revision=rev,
+        )
+        if isinstance(cached, str):
+            return spec, cached
         local = hf_hub_download(
             repo_id=repo, repo_type="dataset", filename=path, revision=rev,
         )
