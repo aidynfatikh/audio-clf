@@ -14,6 +14,10 @@ Model (exactly one):
   --checkpoint <path>  Local MultiTaskBackbone checkpoint (.pt). Label encoders
                        are loaded from a ``label_encoders.json`` next to the
                        checkpoint (falling back to its parent dir).
+  --gemini             Gemini API (requires GEMINI_API_KEY in .env).
+                       Model id via --gemini-model (default gemini-3.1-pro-preview).
+  --qwen               Qwen2-Audio loaded locally via transformers.
+                       Model id via --qwen-model (default Qwen/Qwen2-Audio-7B-Instruct).
 
 Output layout:
     results/comparison/<source_tag>/<model_tag>/
@@ -193,6 +197,158 @@ def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[PredictBatch, di
     return predict_batch, meta
 
 
+# ── Gemini API predictor ────────────────────────────────────────────────────
+
+# Emotion label set exposed to Gemini / Qwen. Excludes "other" and "unknown"
+# so the model is forced into a real class; parse failures still fall back to
+# "unknown" which is already in UNMAPPED_PRED.
+_STRICT_EMOTIONS = ("angry", "disgusted", "fearful", "happy",
+                    "neutral", "sad", "surprised")
+
+_LABEL_ALIASES = {
+    "anger": "angry", "angry": "angry",
+    "disgust": "disgusted", "disgusted": "disgusted",
+    "fear": "fearful", "fearful": "fearful", "afraid": "fearful",
+    "joy": "happy", "happy": "happy", "happiness": "happy",
+    "neutral": "neutral", "calm": "neutral",
+    "sad": "sad", "sadness": "sad",
+    "surprise": "surprised", "surprised": "surprised",
+}
+
+
+def _normalize_free_text_label(raw: str) -> str:
+    s = str(raw).strip().lower().strip(".,!?\"' ")
+    # Try the whole string first, then first word (handles "happy." or "Happy voice").
+    for candidate in (s, s.split()[0] if s.split() else s):
+        if candidate in _LABEL_ALIASES:
+            return _LABEL_ALIASES[candidate]
+    return "unknown"
+
+
+def _build_gemini_predictor(model_id: str, concurrency: int) -> tuple[PredictBatch, dict]:
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as e:
+        raise SystemExit(
+            "google-genai is not installed. Run: pip install google-genai\n"
+            f"(import error: {e})"
+        )
+    from dotenv import load_dotenv
+    import enum as _enum
+    import io
+    import soundfile as sf
+    from concurrent.futures import ThreadPoolExecutor
+
+    load_dotenv(REPO_ROOT / ".env")
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise SystemExit("GEMINI_API_KEY not set (add to .env or env).")
+    client = genai.Client(api_key=api_key)
+
+    Emotion = _enum.Enum(
+        "Emotion", {e.upper(): e for e in _STRICT_EMOTIONS},
+    )
+    gen_config = types.GenerateContentConfig(
+        response_mime_type="text/x.enum",
+        response_schema=Emotion,
+        temperature=0.0,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+    prompt = "Listen to this short utterance and classify the speaker's emotion."
+
+    def predict_one(wav: np.ndarray) -> str:
+        buf = io.BytesIO()
+        sf.write(buf, wav.astype(np.float32), SAMPLE_RATE, format="WAV")
+        audio_part = types.Part.from_bytes(
+            data=buf.getvalue(), mime_type="audio/wav",
+        )
+        try:
+            resp = client.models.generate_content(
+                model=model_id,
+                contents=[audio_part, prompt],
+                config=gen_config,
+            )
+            return _normalize_free_text_label(resp.text or "unknown")
+        except Exception as e:
+            # Don't let one 5xx / timeout nuke the run; log once per batch.
+            sys.stderr.write(f"[gemini] error: {type(e).__name__}: {e}\n")
+            return "unknown"
+
+    pool = ThreadPoolExecutor(max_workers=max(1, concurrency))
+
+    def predict_batch(wavs: list[np.ndarray]) -> list[str]:
+        return list(pool.map(predict_one, wavs))
+
+    meta = {
+        "kind": "gemini",
+        "model": model_id,
+        "concurrency": concurrency,
+        "emotion_classes": list(_STRICT_EMOTIONS),
+    }
+    return predict_batch, meta
+
+
+# ── Qwen2-Audio local predictor ─────────────────────────────────────────────
+
+def _build_qwen_predictor(model_id: str, device: str) -> tuple[PredictBatch, dict]:
+    try:
+        import torch
+        from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
+    except ImportError as e:
+        raise SystemExit(
+            "transformers>=4.45 required for Qwen2-Audio. "
+            f"(import error: {e})"
+        )
+
+    dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+        model_id, torch_dtype=dtype, device_map=device,
+    ).eval()
+
+    emotion_list = ", ".join(_STRICT_EMOTIONS)
+    conversation_template = [
+        {"role": "user", "content": [
+            {"type": "audio", "audio_url": "placeholder"},
+            {"type": "text",
+             "text": f"Listen to this short utterance and classify the speaker's "
+                     f"emotion. Respond with exactly ONE word from this set: "
+                     f"{emotion_list}."},
+        ]},
+    ]
+    text_prompt = processor.apply_chat_template(
+        conversation_template, add_generation_prompt=True, tokenize=False,
+    )
+
+    def predict_one(wav: np.ndarray) -> str:
+        inputs = processor(
+            text=text_prompt, audios=[wav.astype(np.float32)],
+            sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True,
+        )
+        inputs = {k: v.to(model.device) if hasattr(v, "to") else v
+                  for k, v in inputs.items()}
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=8, do_sample=False)
+        # Strip the prompt tokens so we decode only the completion.
+        gen_ids = out[:, inputs["input_ids"].shape[1]:]
+        text = processor.batch_decode(
+            gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+        )[0]
+        return _normalize_free_text_label(text)
+
+    def predict_batch(wavs: list[np.ndarray]) -> list[str]:
+        return [predict_one(w) for w in wavs]
+
+    meta = {
+        "kind": "qwen2-audio",
+        "model": model_id,
+        "dtype": str(dtype),
+        "emotion_classes": list(_STRICT_EMOTIONS),
+    }
+    return predict_batch, meta
+
+
 # ── Per-corpus scoring loop (predictor-agnostic, batched) ───────────────────
 
 def _eval_corpus(
@@ -360,8 +516,18 @@ def main():
     model_group = ap.add_mutually_exclusive_group(required=True)
     model_group.add_argument("--variant", help="FunASR model id, e.g. iic/emotion2vec_plus_large")
     model_group.add_argument("--checkpoint", help="Path to our .pt checkpoint")
+    model_group.add_argument("--gemini", action="store_true",
+                             help="Use Gemini API (requires GEMINI_API_KEY in .env).")
+    model_group.add_argument("--qwen", action="store_true",
+                             help="Use Qwen2-Audio loaded locally.")
     ap.add_argument("--hub", default="hf", choices=["hf", "ms"],
                     help='Hub for --variant: "hf" or "ms". Default hf.')
+    ap.add_argument("--gemini-model", default="gemini-3.1-pro-preview",
+                    help="Gemini API model id (default gemini-3.1-pro-preview).")
+    ap.add_argument("--gemini-concurrency", type=int, default=4,
+                    help="Parallel API calls for --gemini (default 4).")
+    ap.add_argument("--qwen-model", default="Qwen/Qwen2-Audio-7B-Instruct",
+                    help="HF model id for --qwen (default Qwen/Qwen2-Audio-7B-Instruct).")
     ap.add_argument("--out", default=None, help="Output dir. Default: results/comparison/<source>/<tag>/")
     ap.add_argument("--max-samples", type=int, default=None,
                     help="Cap per corpus (useful for quick checks). For --hf-dataset also caps prefetch.")
@@ -404,6 +570,16 @@ def main():
         tag = args.variant.split("/")[-1]
         predict_batch = _build_e2v_predictor(args.variant, args.hub, device)
         model_meta = {"kind": "emotion2vec", "variant": args.variant, "hub": args.hub}
+    elif args.gemini:
+        tag = f"gemini__{args.gemini_model}"
+        predict_batch, meta = _build_gemini_predictor(
+            args.gemini_model, args.gemini_concurrency,
+        )
+        model_meta = meta
+    elif args.qwen:
+        tag = f"qwen__{args.qwen_model.split('/')[-1]}"
+        predict_batch, meta = _build_qwen_predictor(args.qwen_model, device)
+        model_meta = meta
     else:
         ckpt_path = Path(args.checkpoint).resolve()
         if not ckpt_path.exists():
