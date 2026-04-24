@@ -3,9 +3,10 @@
 
 Source (exactly one):
   --split-dir <dir>    splits/<name>/ — per-corpus test slices from the builder.
-  --hf-dataset <id>    HuggingFace dataset id with ``audio`` and ``emotion``
-                       columns (single corpus). Use --max-samples to cap
-                       download via ``train[:N]`` slicing.
+  --hf-dataset <id>    HuggingFace dataset id with a ``data.jsonl`` manifest
+                       and ``audio`` + ``emotion`` fields (single corpus). All
+                       referenced .wav files are prefetched into the HF hub
+                       cache up front; iteration then reads purely from disk.
 
 Model (exactly one):
   --variant <id>       FunASR emotion2vec model id (e.g. iic/emotion2vec_plus_large).
@@ -15,15 +16,15 @@ Model (exactly one):
                        checkpoint (falling back to its parent dir).
 
 Output layout:
-    results/comparison/<split_name>/<model_tag>/
+    results/comparison/<source_tag>/<model_tag>/
         <corpus>.json          # per-corpus metrics
         summary.json           # aggregate across corpora
 
 Usage:
     python comparison/evaluate.py --split-dir splits/b1_b2_noaug_v1 \\
         --variant iic/emotion2vec_plus_large
-    python comparison/evaluate.py --split-dir splits/b1_b2_noaug_v1 \\
-        --checkpoint models/exp1-hubert-b1-b2_20260421-102709/finetune/best_model_finetuned.pt
+    python comparison/evaluate.py --hf-dataset umutkkgz/tr-full-dataset \\
+        --max-samples 5000 --checkpoint results/.../best_model_finetuned.pt
 """
 
 from __future__ import annotations
@@ -61,6 +62,8 @@ E2V_LABELS = {
 }
 UNMAPPED_PRED = {"other", "unknown"}
 
+PredictBatch = Callable[[list[np.ndarray]], list[str]]
+
 
 # ── Audio helpers ───────────────────────────────────────────────────────────
 
@@ -75,20 +78,14 @@ def _resample(wav: np.ndarray, src_sr: int) -> np.ndarray:
 
 
 def _load_row_waveform(row) -> np.ndarray:
-    audio = row["audio"]
-    # Case 1: HF dict form {array, sampling_rate} (Audio(decode=True) legacy).
-    if isinstance(audio, dict) and audio.get("array") is not None:
-        return _resample(np.asarray(audio["array"]), int(audio["sampling_rate"]))
-    # Case 2: new torchcodec AudioDecoder (HF >= 3.x default for Audio).
-    if hasattr(audio, "get_all_samples"):
-        samples = audio.get_all_samples()
-        wav = samples.data.cpu().numpy()  # shape [channels, time]
-        if wav.ndim > 1:
-            wav = wav.mean(axis=0)
-        return _resample(wav, int(samples.sample_rate))
-    # Case 3: raw bytes / local path dict (split-dir flow).
-    wav, sr = read_audio(audio)
+    wav, sr = read_audio(row["audio"])
     return _resample(wav, sr)
+
+
+def _fit_length(wav: np.ndarray) -> np.ndarray:
+    if len(wav) > MAX_AUDIO_SAMPLES:
+        return wav[:MAX_AUDIO_SAMPLES]
+    return np.pad(wav, (0, MAX_AUDIO_SAMPLES - len(wav)))
 
 
 # ── emotion2vec (FunASR) predictor ──────────────────────────────────────────
@@ -103,7 +100,7 @@ def _parse_e2v_label(raw: str) -> str:
     return tail if tail in E2V_LABELS else s
 
 
-def _build_e2v_predictor(variant: str, hub: str, device: str) -> Callable[[np.ndarray], str]:
+def _build_e2v_predictor(variant: str, hub: str, device: str) -> PredictBatch:
     try:
         from funasr import AutoModel
     except ImportError as e:
@@ -113,7 +110,7 @@ def _build_e2v_predictor(variant: str, hub: str, device: str) -> Callable[[np.nd
         )
     model = AutoModel(model=variant, hub=hub, device=device, disable_update=True)
 
-    def predict(wav: np.ndarray) -> str:
+    def predict_one(wav: np.ndarray) -> str:
         out = model.generate(
             wav, granularity="utterance", extract_embedding=False, disable_pbar=True,
         )
@@ -126,7 +123,11 @@ def _build_e2v_predictor(variant: str, hub: str, device: str) -> Callable[[np.nd
             return max(zip(parsed, scores), key=lambda kv: float(kv[1]))[0]
         return parsed[0] if parsed else "unknown"
 
-    return predict
+    # FunASR's generate() doesn't batch cleanly across its model zoo; loop.
+    def predict_batch(wavs: list[np.ndarray]) -> list[str]:
+        return [predict_one(w) for w in wavs]
+
+    return predict_batch
 
 
 # ── Our model (MultiTaskBackbone) predictor ─────────────────────────────────
@@ -141,7 +142,7 @@ def _find_label_encoders(ckpt_path: Path) -> Path:
     )
 
 
-def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[Callable[[np.ndarray], str], dict]:
+def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[PredictBatch, dict]:
     import torch
     from multihead.model import MultiTaskBackbone
     from utils.config import build_feature_extractor
@@ -166,21 +167,18 @@ def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[Callable[[np.nda
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model = model.to(device).eval()
     processor = build_feature_extractor(pretrained)
-
     torch_device = torch.device(device)
 
-    def predict(wav: np.ndarray) -> str:
-        w = wav
-        if len(w) > MAX_AUDIO_SAMPLES:
-            w = w[:MAX_AUDIO_SAMPLES]
-        else:
-            w = np.pad(w, (0, MAX_AUDIO_SAMPLES - len(w)))
-        inputs = processor(w, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True)
+    def predict_batch(wavs: list[np.ndarray]) -> list[str]:
+        fitted = [_fit_length(w) for w in wavs]
+        inputs = processor(
+            fitted, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True,
+        )
         iv = inputs.input_values.to(torch_device)
         with torch.no_grad():
             emo_logits, _, _ = model(iv)
-        idx = int(emo_logits.argmax(dim=1).item())
-        return id2emotion[idx]
+        idxs = emo_logits.argmax(dim=1).tolist()
+        return [id2emotion[int(i)] for i in idxs]
 
     meta = {
         "checkpoint": str(ckpt_path),
@@ -189,16 +187,17 @@ def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[Callable[[np.nda
         "pretrained": pretrained,
         "emotion_classes": sorted(emotion_encoder.keys()),
     }
-    return predict, meta
+    return predict_batch, meta
 
 
-# ── Per-corpus scoring loop (predictor-agnostic) ────────────────────────────
+# ── Per-corpus scoring loop (predictor-agnostic, batched) ───────────────────
 
 def _eval_corpus(
-    predict: Callable[[np.ndarray], str],
+    predict_batch: PredictBatch,
     corpus_name: str,
     dataset,
     max_samples: int | None,
+    batch_size: int,
 ) -> dict:
     n = len(dataset)
     if max_samples is not None and max_samples > 0:
@@ -212,29 +211,47 @@ def _eval_corpus(
     per_class = defaultdict(lambda: {"correct": 0, "total": 0})
     confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
-    for row in tqdm(dataset, desc=corpus_name, unit="clip"):
+    pbar = tqdm(total=n, desc=corpus_name, unit="clip")
+    batch_wavs: list[np.ndarray] = []
+    batch_gts: list[str] = []
+
+    def flush():
+        nonlocal correct, counted, predicted_unmapped
+        if not batch_wavs:
+            return
+        preds = predict_batch(batch_wavs)
+        for gt, pred in zip(batch_gts, preds):
+            confusion[gt][pred] += 1
+            if pred in UNMAPPED_PRED:
+                predicted_unmapped += 1
+                continue
+            per_class[gt]["total"] += 1
+            if pred == gt:
+                per_class[gt]["correct"] += 1
+                correct += 1
+            counted += 1
+        pbar.update(len(batch_wavs))
+        batch_wavs.clear()
+        batch_gts.clear()
+
+    for row in dataset:
         gt = row.get("emotion")
         if gt is None:
             skipped_gt_oov += 1
+            pbar.update(1)
             continue
         gt = str(gt).strip().lower()
         if gt in UNMAPPED_PRED:
             skipped_gt_oov += 1
+            pbar.update(1)
             continue
 
-        wav = _load_row_waveform(row)
-        pred = predict(wav)
-
-        confusion[gt][pred] += 1
-        if pred in UNMAPPED_PRED:
-            predicted_unmapped += 1
-            continue
-
-        per_class[gt]["total"] += 1
-        if pred == gt:
-            per_class[gt]["correct"] += 1
-            correct += 1
-        counted += 1
+        batch_wavs.append(_load_row_waveform(row))
+        batch_gts.append(gt)
+        if len(batch_wavs) >= batch_size:
+            flush()
+    flush()
+    pbar.close()
 
     acc = correct / counted if counted else 0.0
     per_class_acc = {
@@ -259,15 +276,12 @@ def _eval_corpus(
     }
 
 
-# ── Main ────────────────────────────────────────────────────────────────────
+# ── Source loaders ──────────────────────────────────────────────────────────
 
 def _checkpoint_tag(ckpt_path: Path) -> str:
     # e.g. models/exp1-.../finetune/best_model_finetuned.pt
     # → exp1-...__finetune__best_model_finetuned
-    parts = ckpt_path.with_suffix("").parts
-    # Drop leading filesystem root ('/') and any empty segments so the tag
-    # never produces an absolute path when the ckpt is outside models/.
-    parts = tuple(p for p in parts if p and p != "/")
+    parts = tuple(p for p in ckpt_path.with_suffix("").parts if p and p != "/")
     if "models" in parts:
         parts = parts[parts.index("models") + 1:]
     elif "results" in parts:
@@ -279,57 +293,65 @@ def _checkpoint_tag(ckpt_path: Path) -> str:
 
 def _load_hf_dataset_as_corpus(
     hf_id: str,
-    hf_split: str,
     max_samples: int | None,
-    prefetch: bool = True,
-    manifest: str = "data.jsonl",
-    prefetch_workers: int = 16,
+    manifest: str,
+    prefetch_workers: int,
 ):
-    """Load an HF dataset as a single corpus with 'audio' + 'emotion' columns.
+    """Return a Dataset with ``audio`` + ``emotion`` columns.
 
-    Uses train[:N] slice syntax when max_samples is given so we don't pull all
-    shards. When ``prefetch`` is set, audio files referenced by the first
-    ``max_samples`` manifest rows (or all rows if uncapped) are downloaded in
-    parallel up front so iteration hits the HF disk cache instead of fetching
-    per-row over HTTP.
+    Auto-detects the loading strategy:
+      * **Manifest-backed** (``data.jsonl`` at repo root, per-file audio refs):
+        prefetch every referenced .wav into the HF cache, then build a Dataset
+        from those local paths. Used by e.g. ``umutkkgz/tr-full-dataset``.
+      * **Parquet/script-backed** (audio bytes embedded in shards):
+        ``load_dataset`` downloads the shards up front and iteration hits local
+        disk. Used by e.g. ``Martingkc/processed_audio_tr-with-emotions``.
     """
-    from datasets import Audio, load_dataset
+    from huggingface_hub import hf_hub_download
 
-    if prefetch:
+    try:
+        hf_hub_download(repo_id=hf_id, repo_type="dataset", filename=manifest)
+        has_manifest = True
+    except Exception:
+        has_manifest = False
+
+    if has_manifest:
+        from datasets import Dataset
         from comparison.prefetch_hf import prefetch_hf_audio
-        try:
-            prefetch_hf_audio(
-                hf_id, max_samples, manifest=manifest, max_workers=prefetch_workers,
+        rows = prefetch_hf_audio(
+            hf_id, max_samples, manifest=manifest, max_workers=prefetch_workers,
+        )
+        if not rows:
+            raise SystemExit(f"No usable rows from {hf_id} manifest {manifest!r}")
+        if "emotion" not in rows[0]:
+            raise SystemExit(
+                f"{hf_id} manifest has no 'emotion' field (keys: {sorted(rows[0])})"
             )
-        except Exception as e:
-            print(
-                f"[cmp] prefetch skipped ({type(e).__name__}: {e}) — "
-                "iteration will fall back to per-row HTTP fetches.",
-                flush=True,
-            )
+        return Dataset.from_list(rows)
 
-    split_spec = hf_split
+    # Parquet/script flow — audio is inside shards, no prefetch needed.
+    from datasets import Audio, load_dataset
+    split_spec = "train"
     if max_samples is not None and max_samples > 0:
-        split_spec = f"{hf_split}[:{max_samples}]"
+        split_spec = f"train[:{max_samples}]"
+    print(f"[cmp] no {manifest!r} in {hf_id} — using load_dataset({split_spec!r})", flush=True)
     ds = load_dataset(hf_id, split=split_spec)
     if "emotion" not in ds.column_names:
-        raise SystemExit(
-            f"{hf_id} has no 'emotion' column (columns: {ds.column_names})"
-        )
-    # Keep HF's default Audio(decode=True) so we get in-memory arrays — the
-    # split-dir path uses Audio(decode=False) with local HF cache paths, but
-    # remote-only datasets store URLs that soundfile can't open directly.
+        raise SystemExit(f"{hf_id} has no 'emotion' column (columns: {ds.column_names})")
     if "audio" in ds.column_names:
-        ds = ds.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
+        # decode=False → rows carry {'bytes': ..., 'path': ...}, which our
+        # read_audio() handles identically to the split-dir and manifest flows.
+        ds = ds.cast_column("audio", Audio(decode=False))
     return ds
 
+
+# ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--split-dir", help="Path to splits/<name>/ dir (per-corpus test slices)")
-    src.add_argument("--hf-dataset", help="HuggingFace dataset id (single corpus), e.g. umutkkgz/tr-full-dataset")
-    ap.add_argument("--hf-split", default="train", help='Split name for --hf-dataset (default "train")')
+    src.add_argument("--hf-dataset", help="HF dataset id with a data.jsonl manifest, e.g. umutkkgz/tr-full-dataset")
     ap.add_argument("--corpus-name", default=None,
                     help="Corpus name used in output filenames. Default: last segment of --hf-dataset.")
     model_group = ap.add_mutually_exclusive_group(required=True)
@@ -339,17 +361,16 @@ def main():
                     help='Hub for --variant: "hf" or "ms". Default hf.')
     ap.add_argument("--out", default=None, help="Output dir. Default: results/comparison/<source>/<tag>/")
     ap.add_argument("--max-samples", type=int, default=None,
-                    help="Cap per corpus (useful for quick checks). For --hf-dataset also limits download via train[:N] slice.")
+                    help="Cap per corpus (useful for quick checks). For --hf-dataset also caps prefetch.")
     ap.add_argument("--device", default=None, help="cpu|cuda (default: auto)")
+    ap.add_argument("--batch-size", type=int, default=16,
+                    help="Inference batch size (default 16). FunASR --variant runs effectively batch=1.")
     ap.add_argument("--hf-manifest", default="data.jsonl",
-                    help='Manifest filename for --hf-dataset prefetch (default "data.jsonl")')
+                    help='Manifest filename inside --hf-dataset (default "data.jsonl")')
     ap.add_argument("--prefetch-workers", type=int, default=16,
                     help="Parallel download workers for --hf-dataset audio prefetch (default 16)")
-    ap.add_argument("--no-prefetch", action="store_true",
-                    help="Skip audio prefetch for --hf-dataset (iterate with per-row HTTP fetches)")
     args = ap.parse_args()
 
-    # Resolve source → (source_tag, per_corpus dict, source metadata)
     if args.split_dir:
         split_dir = Path(args.split_dir).resolve()
         if not (split_dir / "config.yaml").exists():
@@ -363,16 +384,14 @@ def main():
         source_tag = args.hf_dataset.replace("/", "__")
         corpus_name = args.corpus_name or args.hf_dataset.split("/")[-1]
         ds = _load_hf_dataset_as_corpus(
-            args.hf_dataset, args.hf_split, args.max_samples,
-            prefetch=not args.no_prefetch,
-            manifest=args.hf_manifest,
-            prefetch_workers=args.prefetch_workers,
+            args.hf_dataset, args.max_samples,
+            manifest=args.hf_manifest, prefetch_workers=args.prefetch_workers,
         )
         per_corpus = {corpus_name: ds}
         source_meta = {
             "kind": "hf_dataset",
             "hf_dataset": args.hf_dataset,
-            "hf_split": args.hf_split,
+            "manifest": args.hf_manifest,
         }
 
     import torch
@@ -380,14 +399,14 @@ def main():
 
     if args.variant:
         tag = args.variant.split("/")[-1]
-        predict = _build_e2v_predictor(args.variant, args.hub, device)
+        predict_batch = _build_e2v_predictor(args.variant, args.hub, device)
         model_meta = {"kind": "emotion2vec", "variant": args.variant, "hub": args.hub}
     else:
         ckpt_path = Path(args.checkpoint).resolve()
         if not ckpt_path.exists():
             raise SystemExit(f"Checkpoint not found: {ckpt_path}")
         tag = _checkpoint_tag(ckpt_path)
-        predict, meta = _build_our_predictor(ckpt_path, device)
+        predict_batch, meta = _build_our_predictor(ckpt_path, device)
         model_meta = {"kind": "multitask_backbone", **meta}
 
     out_dir = Path(args.out) if args.out else (
@@ -396,7 +415,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[cmp] model={model_meta}", flush=True)
-    print(f"[cmp] source={source_meta} device={device}", flush=True)
+    print(f"[cmp] source={source_meta} device={device} batch_size={args.batch_size}", flush=True)
     print(f"[cmp] out_dir={out_dir}", flush=True)
 
     aggregate = {
@@ -406,7 +425,7 @@ def main():
     }
     for corpus, ds in per_corpus.items():
         print(f"[cmp] {corpus}: {len(ds)} test rows", flush=True)
-        metrics = _eval_corpus(predict, corpus, ds, args.max_samples)
+        metrics = _eval_corpus(predict_batch, corpus, ds, args.max_samples, args.batch_size)
         (out_dir / f"{corpus}.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False))
         aggregate["per_corpus"][corpus] = {
             "n_scored": metrics["n_scored"],
