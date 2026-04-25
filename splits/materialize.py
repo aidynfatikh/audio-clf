@@ -76,20 +76,29 @@ def _slice_by_source_index(src: Dataset, indices: list[int]) -> Dataset:
     return src.select(indices)
 
 
-def _canonical_features(reference: Dataset | None = None) -> Features:
+def _canonical_features(reference: Dataset | None = None, with_provenance: bool = False) -> Features:
     audio_feat = (
         reference.features["audio"]
         if reference is not None and "audio" in reference.features
         else Audio(decode=False)
     )
-    return Features(
-        {
-            "audio": audio_feat,
-            "emotion": Value("string"),
-            "gender": Value("string"),
-            "age_category": Value("string"),
-        }
-    )
+    feats: dict[str, Any] = {
+        "audio": audio_feat,
+        "emotion": Value("string"),
+        "gender": Value("string"),
+        "age_category": Value("string"),
+    }
+    if with_provenance:
+        feats.update(
+            {
+                "source_dataset": Value("string"),
+                "source_row_id": Value("string"),
+                "source_index": Value("int64"),
+                "speaker_id": Value("string"),
+                "augmented": Value("bool"),
+            }
+        )
+    return Features(feats)
 
 
 # Canonical label vocab — anything outside these sets becomes None and is
@@ -116,7 +125,12 @@ def _canon_label(v: Any, canon: set[str], alias: dict[str, str]) -> str | None:
     return alias.get(s.lower())  # None if unknown
 
 
-def _ensure_labels_and_cast(split: Dataset, reference: Dataset | None = None) -> Dataset:
+def _ensure_labels_and_cast(
+    split: Dataset,
+    reference: Dataset | None = None,
+    *,
+    manifest_rows: list[dict[str, Any]] | None = None,
+) -> Dataset:
     needed = ("emotion", "gender", "age_category")
     missing = [c for c in needed if c not in split.column_names]
     if missing:
@@ -137,27 +151,50 @@ def _ensure_labels_and_cast(split: Dataset, reference: Dataset | None = None) ->
         return row
     split = split.map(_normalize, desc="normalize_labels")
 
-    target = _canonical_features(reference)
+    with_prov = manifest_rows is not None
+    if with_prov:
+        if len(manifest_rows) != len(split):
+            raise RuntimeError(
+                f"materialize: manifest_rows={len(manifest_rows)} != sliced rows={len(split)}"
+            )
+        split = split.add_column("source_dataset", [r["dataset"] for r in manifest_rows])
+        split = split.add_column("source_row_id", [str(r["row_id"]) for r in manifest_rows])
+        split = split.add_column(
+            "source_index", [int(r["source_index"]) for r in manifest_rows]
+        )
+        split = split.add_column(
+            "speaker_id", [r.get("speaker_id") for r in manifest_rows]
+        )
+        split = split.add_column(
+            "augmented",
+            [bool(r.get("augmented")) if r.get("augmented") is not None else None
+             for r in manifest_rows],
+        )
+
+    target = _canonical_features(reference, with_provenance=with_prov)
     return split.cast(target)
 
 
-def materialize_split(split_dir: Path) -> dict[str, Dataset]:
-    """Return {split_name: Dataset(audio, emotion, gender, age_category)} by joining manifests to HF sources.
+def materialize_split(split_dir: Path, *, with_provenance: bool = False) -> dict[str, Dataset]:
+    """Return {split_name: Dataset} by joining manifests to HF sources.
 
-    All splits share the same canonical schema so they can be concatenated.
+    Default schema: audio, emotion, gender, age_category. With ``with_provenance=True``
+    each row also carries source_dataset, source_row_id, source_index, speaker_id,
+    augmented — used when pushing a self-contained dataset to the Hub.
     """
     split_dir = Path(split_dir)
     cfg = _read_split_config(split_dir)
     corpora_cfg = cfg.get("corpora", {}) or {}
     manifests = read_manifests(split_dir)
 
-    # Group manifest rows by (split, dataset) → list of source_index
-    grouped: dict[tuple[str, str], list[int]] = defaultdict(list)
+    # Group manifest rows by (split, dataset), preserving manifest order so
+    # provenance columns line up with `select(indices)` output.
+    grouped_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for split_name, rows in manifests.items():
         for r in rows:
-            grouped[(split_name, r["dataset"])].append(int(r["source_index"]))
+            grouped_rows[(split_name, r["dataset"])].append(r)
 
-    datasets_used = sorted({ds for (_, ds) in grouped.keys()})
+    datasets_used = sorted({ds for (_, ds) in grouped_rows.keys()})
     sources: dict[str, Dataset] = {}
     for ds in datasets_used:
         ds_cfg = corpora_cfg.get(ds, {})
@@ -176,22 +213,37 @@ def materialize_split(split_dir: Path) -> dict[str, Dataset]:
     out: dict[str, Dataset] = {}
     for split_name in ALL_SPLITS:
         parts: list[Dataset] = []
-        # Preserve order: batch01, batch02, kazemo
+        # Preserve order: batch01, batch02, kazemo, kazattsd
         for ds in (DATASET_BATCH01, DATASET_BATCH02, DATASET_KAZEMO, DATASET_KAZATTSD):
             key = (split_name, ds)
-            if key not in grouped:
+            if key not in grouped_rows:
                 continue
-            indices = grouped[key]
+            mrows = grouped_rows[key]
+            indices = [int(r["source_index"]) for r in mrows]
             sliced = _slice_by_source_index(sources[ds], indices)
-            sliced = _ensure_labels_and_cast(sliced, reference=ref)
+            sliced = _ensure_labels_and_cast(
+                sliced,
+                reference=ref,
+                manifest_rows=mrows if with_provenance else None,
+            )
             parts.append(sliced)
         if not parts:
             # Empty split — keep schema via reference
             if ref is not None:
-                empty = _ensure_labels_and_cast(ref.select([]), reference=ref)
+                empty = _ensure_labels_and_cast(
+                    ref.select([]),
+                    reference=ref,
+                    manifest_rows=[] if with_provenance else None,
+                )
                 out[split_name] = empty
             else:
-                out[split_name] = Dataset.from_dict({"audio": [], "emotion": [], "gender": [], "age_category": []})
+                base = {"audio": [], "emotion": [], "gender": [], "age_category": []}
+                if with_provenance:
+                    base.update({
+                        "source_dataset": [], "source_row_id": [],
+                        "source_index": [], "speaker_id": [], "augmented": [],
+                    })
+                out[split_name] = Dataset.from_dict(base)
         else:
             out[split_name] = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
     return out
@@ -249,7 +301,7 @@ def materialize_named_test(split_dir: Path) -> dict[str, Dataset]:
     return _materialize_per_corpus(split_dir, SPLIT_TEST)
 
 
-def load_split_as_hf_dataset(split_dir: Path) -> DatasetDict:
+def load_split_as_hf_dataset(split_dir: Path, *, with_provenance: bool = False) -> DatasetDict:
     """Simple DatasetDict(train/val/test) — used by the HF push script."""
-    splits = materialize_split(split_dir)
+    splits = materialize_split(split_dir, with_provenance=with_provenance)
     return DatasetDict({k: v for k, v in splits.items() if v is not None})
