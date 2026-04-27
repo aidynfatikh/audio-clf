@@ -126,18 +126,31 @@ def build_summary(
     per_split = {s: len(v) for s, v in assignments.items()}
 
     per_ds_split: dict[str, dict[str, int]] = defaultdict(lambda: {s: 0 for s in ALL_SPLITS})
+    per_ds_split_aug: dict[str, dict[str, int]] = defaultdict(lambda: {s: 0 for s in ALL_SPLITS})
     per_split_emotion: dict[str, Counter] = {s: Counter() for s in ALL_SPLITS}
     per_split_gender: dict[str, Counter] = {s: Counter() for s in ALL_SPLITS}
     per_split_age: dict[str, Counter] = {s: Counter() for s in ALL_SPLITS}
     per_split_speakers: dict[str, set] = {s: set() for s in ALL_SPLITS}
     per_ds_split_speakers: dict[tuple[str, str], set] = defaultdict(set)
+    # corpus → split → emotion → {"total": int, "augmented": int}
+    per_ds_split_emotion: dict[str, dict[str, dict[str, dict[str, int]]]] = defaultdict(
+        lambda: {s: defaultdict(lambda: {"total": 0, "augmented": 0}) for s in ALL_SPLITS}
+    )
 
     for s, rows in assignments.items():
         for r in rows:
             ds = r["dataset"]
+            is_aug = r.get("augmented") is True
             per_ds_split[ds][s] += 1
+            if is_aug:
+                per_ds_split_aug[ds][s] += 1
             if r.get("emotion"):
-                per_split_emotion[s][r["emotion"]] += 1
+                emo = r["emotion"]
+                per_split_emotion[s][emo] += 1
+                bucket = per_ds_split_emotion[ds][s][emo]
+                bucket["total"] += 1
+                if is_aug:
+                    bucket["augmented"] += 1
             if r.get("gender"):
                 per_split_gender[s][r["gender"]] += 1
             if r.get("age_category"):
@@ -166,6 +179,16 @@ def build_summary(
         "speaker_counts": {s: len(v) for s, v in per_split_speakers.items()},
         "speaker_counts_per_corpus_split": {
             f"{ds}:{sp}": len(v) for (ds, sp), v in per_ds_split_speakers.items()
+        },
+        "per_corpus_aug_count": {
+            ds: dict(per_ds_split_aug[ds]) for ds in sorted(per_ds_split_aug)
+        },
+        "per_corpus_emotion_counts": {
+            ds: {
+                s: {emo: dict(d) for emo, d in sorted(per_ds_split_emotion[ds][s].items())}
+                for s in ALL_SPLITS
+            }
+            for ds in sorted(per_ds_split_emotion)
         },
     }
     if kazemo_resolved:

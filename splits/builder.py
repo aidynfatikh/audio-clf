@@ -511,10 +511,11 @@ def build_splits(config_path: Path | str, *, force: bool = False) -> Path:
         assignments=assignments,
         kazemo_resolved=kazemo_resolved,
         extra={
-            "ratio_drift_errors": drift_errs,
-            "emotion_coverage_warnings": _check_emotion_coverage(assignments, min_emo)
-            if min_emo > 0
-            else [],
+            **(
+                {"emotion_coverage_warnings": _check_emotion_coverage(assignments, min_emo)}
+                if min_emo > 0 and _check_emotion_coverage(assignments, min_emo)
+                else {}
+            ),
             "dropped_rows": dropped_rows,
             "leak_check": leak_check,
         },

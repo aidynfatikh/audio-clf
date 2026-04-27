@@ -31,6 +31,18 @@ def test_parse_fearful_synonym():
     assert parse_kazemo_speaker(row) == "voicea"
 
 
+def test_parse_emokaz_utterance_first_layout():
+    # EmoKaz.zip uses <utt_id>_<emotion>_<narrator>.wav — narrator-token wins.
+    row = {"audio": {"path": "/cache/extracted_partial/1263201035_neutral_F1.wav"}}
+    assert parse_kazemo_speaker(row) == "f1"
+
+
+def test_parse_emokaz_narrator_dir():
+    # Or speaker may live in a parent dir like F1/neutral_001.wav
+    row = {"audio": {"path": "/cache/EmoKaz/M2/neutral_001.wav"}}
+    assert parse_kazemo_speaker(row) == "m2"
+
+
 def test_three_way_split_deterministic():
     rows = []
     for i in range(10):
@@ -63,7 +75,7 @@ def test_three_way_split_is_seeded():
     a = kazemo_three_way_split(rows, set(), {"c"}, {"val": 0.5, "test": 0.5}, seed=1)
     b = kazemo_three_way_split(rows, set(), {"c"}, {"val": 0.5, "test": 0.5}, seed=1)
     assert a == b
-    c = kazemo_three_way_split(rows, set(), "c", {"val": 0.5, "test": 0.5}, seed=2)
+    c = kazemo_three_way_split(rows, set(), {"c"}, {"val": 0.5, "test": 0.5}, seed=2)
     assert a != c
 
 
@@ -71,9 +83,9 @@ def test_resolve_by_index():
     train, valtest = resolve_kazemo_speakers(
         ["c", "a", "b"], strategy="by_index", train_indices=[0, 1], valtest_index=2
     )
-    # sorted → [a, b, c]; train = {a,b}, valtest = c
+    # sorted → [a, b, c]; train = {a,b}, valtest = {c}
     assert train == {"a", "b"}
-    assert valtest == "c"
+    assert valtest == {"c"}
 
 
 def test_resolve_by_name():
@@ -81,7 +93,7 @@ def test_resolve_by_name():
         ["a", "b", "c"], strategy="by_name", train_names=["a", "c"], valtest_name="b"
     )
     assert train == {"a", "c"}
-    assert valtest == "b"
+    assert valtest == {"b"}
 
 
 def test_resolve_by_index_out_of_range():

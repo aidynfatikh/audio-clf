@@ -32,26 +32,46 @@ def _candidates(row: dict[str, Any]) -> list[str]:
     if isinstance(a, dict):
         p = a.get("path")
         if isinstance(p, str) and p:
-            out.append(Path(p).name)
+            # Keep full path so parent-dir narrator tokens (e.g. .../F1/x.wav)
+            # remain visible to parse_kazemo_speaker.
+            out.append(p)
     rid = row.get("row_id") or row.get("id")
     if isinstance(rid, str) and rid:
         out.append(rid)
     return out
 
 
+_NARRATOR_RE = re.compile(r"^[fm]\d+$", re.IGNORECASE)
+
+
 def parse_kazemo_speaker(row: dict[str, Any]) -> str | None:
-    """Return normalized speaker id (lowercase), or None if parse fails."""
+    """Return normalized speaker id (lowercase), or None if parse fails.
+
+    KazEmoTTS has 3 narrators (F1, M1, M2). Filenames in the EmoKaz.zip use
+    a `<utt_id>_<emotion>_<narrator>.wav` layout — utterance-id-first, not
+    speaker-first. We first scan every token (across all candidate strings:
+    text field, audio path, parent dirs) for a narrator-like token (F\\d+ /
+    M\\d+); if one is found, that's the speaker. If no narrator token is
+    present anywhere, fall back to the legacy "everything before the first
+    emotion token" heuristic for compatibility with non-EmoKaz layouts.
+    """
+    for raw in _candidates(row):
+        # Walk full path so parent directories like "F1/" also count.
+        p = Path(raw)
+        path_tokens: list[str] = []
+        for part in (*p.parts[:-1], p.stem):
+            path_tokens.extend(t for t in re.split(r"[_\W]+", part) if t)
+        for tok in path_tokens:
+            if _NARRATOR_RE.match(tok):
+                return tok.lower()
+
+    # Fallback: legacy <speaker>_<emotion>_<utt> layout.
     for raw in _candidates(row):
         stem = Path(raw).stem
-        tokens = re.split(r"[_\W]+", stem)
-        if not tokens:
-            continue
+        tokens = [t for t in re.split(r"[_\W]+", stem) if t]
         speaker_parts: list[str] = []
         for tok in tokens:
-            if not tok:
-                continue
             if tok.lower() in _EMO_MAP:
-                # emotion token reached — everything before it is the speaker
                 if speaker_parts:
                     return "_".join(speaker_parts).lower()
                 return None
