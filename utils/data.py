@@ -4,69 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from datasets import Audio, Features, Value
 from torch.utils.data import Dataset as TorchDataset
 
 from loaders.load_data import read_audio
-from utils.misc import SAMPLE_RATE, RANDOM_SEED
-
-VAL_FRACTION = 0.1
-
-
-# ── HF dataset preparation ───────────────────────────────────────────────────
-
-def fallback_split_train_val(
-    train_split, *, seed: int = RANDOM_SEED, val_fraction: float = VAL_FRACTION
-):
-    """Create a disjoint (train, val) split from a single HF Dataset."""
-    if train_split is None:
-        raise ValueError("train_split must not be None")
-    if len(train_split) < 2:
-        raise ValueError(f"Not enough rows to split train/val (n={len(train_split)})")
-
-    stratify_col = "emotion" if "emotion" in getattr(train_split, "column_names", []) else None
-    kwargs = dict(test_size=val_fraction, seed=seed, shuffle=True)
-    if stratify_col is not None:
-        try:
-            split = train_split.train_test_split(**(kwargs | {"stratify_by_column": stratify_col}))
-            return split["train"], split["test"]
-        except (TypeError, ValueError):
-            pass
-    split = train_split.train_test_split(**kwargs)
-    return split["train"], split["test"]
-
-
-def _ensure_label_columns(split):
-    needed = ("emotion", "gender", "age_category")
-    missing = [c for c in needed if c not in split.column_names]
-    if missing:
-        def _inject_missing(row):
-            for c in missing:
-                row[c] = None
-            return row
-        split = split.map(_inject_missing, desc=f"Injecting missing columns: {','.join(missing)}")
-    return split
-
-
-def _prepare_split_for_training(split):
-    if "audio" in split.column_names:
-        split = split.cast_column("audio", Audio(decode=False))
-    return _ensure_label_columns(split)
-
-
-def _force_canonical_label_schema(split, reference_split=None):
-    keep_cols = ["audio", "emotion", "gender", "age_category"]
-    split = split.select_columns(keep_cols)
-    if reference_split is not None:
-        return split.cast(reference_split.features)
-    audio_feature = split.features["audio"] if "audio" in split.features else Audio(decode=False)
-    target_features = Features({
-        "audio": audio_feature,
-        "emotion": Value("string"),
-        "gender": Value("string"),
-        "age_category": Value("string"),
-    })
-    return split.cast(target_features)
+from utils.misc import SAMPLE_RATE
 
 
 def _count_label_presence(split):
@@ -84,20 +25,6 @@ def _count_label_presence(split):
         if _present(row.get("age_category")):
             counts["age"] += 1
     return counts
-
-
-def _count_emotion_distribution(split):
-    counts: dict[str, int] = {}
-    split_no_audio = split.remove_columns(["audio"]) if "audio" in split.column_names else split
-    for row in split_no_audio:
-        emo = row.get("emotion")
-        if emo is None:
-            continue
-        emo = str(emo).strip()
-        if not emo:
-            continue
-        counts[emo] = counts.get(emo, 0) + 1
-    return dict(sorted(counts.items()))
 
 
 # ── PyTorch dataset ──────────────────────────────────────────────────────────

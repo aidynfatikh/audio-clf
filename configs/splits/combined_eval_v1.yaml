@@ -1,0 +1,62 @@
+name: combined_eval_v1
+seed: 42
+speaker_disjoint: true
+stratify_by: emotion
+output_dir: splits
+
+# Combined held-out test pool covering every corpus. Built once, reused by
+# eval/evaluate_all.py to score every stage-2 checkpoint on the SAME rows so
+# numbers are directly comparable across experiments.
+#
+# Notes
+# -----
+# * augmented_policy is `drop_all` everywhere — test set is real audio only.
+# * kazemo is eval-only (`valtest_all`) so 100% of the 5k subsample lands in
+#   val+test pools; the test_ratio split below routes 1.0 of valtest into test.
+# * Same seed (42) as every prior split → speaker assignments are stable, so a
+#   speaker that landed in train under e.g. b1_b2_kazattsd_aug_v1 will not
+#   reappear in this test pool. (Verify via `splits.io.read_speaker_assignments`
+#   if in doubt.)
+
+corpora:
+  batch01:
+    mode: split
+    hf_id: 01gumano1d/batch01-validation-test
+    hf_split: train
+    cache_dir: data/batch01-validation-test
+    ratios: {train: 0.70, val: 0.15, test: 0.15}
+    speaker_column: speaker_id
+    augmented_policy: drop_all
+
+  batch02:
+    mode: split
+    hf_id: 01gumano1d/batch2-aug-clean
+    hf_split: train
+    cache_dir: data/batch2-aug-clean
+    ratios: {train: 0.90, val: 0.05, test: 0.05}
+    group_by: source_recording
+    augmented_policy: drop_all
+
+  kazattsd:
+    mode: split
+    hf_id: 01gumano1d/KazATTSD-batch0
+    hf_split: train
+    cache_dir: data/kazattsd
+    ratios: {train: 0.90, val: 0.05, test: 0.05}
+    speaker_column: speaker_id
+    augmented_policy: drop_all
+
+  kazemo:
+    mode: split
+    cache_dir: data/kazemo
+    max_samples: 5000
+    max_per_speaker: null
+    speaker_selection:
+      strategy: valtest_all
+    valtest_ratio: {val: 0.0, test: 1.0}
+
+checks:
+  fail_on_speaker_overlap: true
+  fail_on_row_overlap: true
+  max_ratio_drift_pp: 5
+  min_samples_per_emotion_per_split: 5

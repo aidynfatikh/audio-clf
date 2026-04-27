@@ -44,11 +44,7 @@ from utils.checkpointing import (
     save_wandb_file_artifact,
 )
 from utils.data import AudioDataset, build_label_encoders, compute_class_weights
-from utils.data_loading import (
-    KAZEMO_MAX_SAMPLES,
-    USE_KAZEMO,
-    build_mixed_train_val_splits,
-)
+from utils.data_loading import build_mixed_train_val_splits
 from utils.config import build_feature_extractor, load_stage_config
 from utils.misc import (
     BATCH_SIZE_ENV_VAR,
@@ -155,27 +151,8 @@ def main():
     processor = build_feature_extractor(_pretrained)
 
     print("Dataset composition:")
-    _mode = composition.get("mode")
-    if _mode == "split_manifest":
-        print(f"  Mode: split_manifest ({composition['manifest_dir']})")
-        print(f"  Test total: {composition.get('test_total', 0)}")
-    elif _mode == "holdout_manifest":
-        print("  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
-        print(f"  Manifest: {composition['manifest']}")
-        print(
-            f"  batch01 train-only / val holdout: {composition['batch01_train_only']} / {composition['hf_val']}"
-        )
-        print(f"  batch02 train-only (full split): {composition['batch02_train_only']}")
-    if "hf_train" in composition:
-        print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
-    if "kazemo_train" in composition:
-        print(
-            f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
-            f"{composition['kazemo_train']} / {composition['kazemo_val']}"
-        )
-    if composition.get("kazemo_emotion_counts"):
-        emo_counts = ", ".join([f"{k}:{v}" for k, v in composition["kazemo_emotion_counts"].items()])
-        print(f"  Kazemo selected emotion counts: {emo_counts}")
+    print(f"  Mode: split_manifest ({composition['manifest_dir']})")
+    print(f"  Test total: {composition.get('test_total', 0)}")
     print(f"  Mixed train/val total: {composition['train_total']} / {composition['val_total']}")
     print(
         f"  Train labels present: emotion={composition['train_label_counts']['emotion']}, "
@@ -357,7 +334,6 @@ def main():
                     'age_weight': AGE_WEIGHT,
                     'grad_clip_norm': GRAD_CLIP_NORM,
                     'early_stopping_patience': EARLY_STOPPING_PATIENCE,
-                    'use_kazemo': USE_KAZEMO,
                     'checkpoint_every_steps': CHECKPOINT_EVERY_STEPS,
                     'val_every_steps': VAL_EVERY_STEPS,
                 },

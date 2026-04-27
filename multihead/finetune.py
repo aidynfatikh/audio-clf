@@ -6,8 +6,8 @@ Stage 2 training: loads a checkpoint from frozen-backbone training (``multihead/
 then unfreezes the top-N HuBERT transformer layers (ranked by learned per-task
 layer weights), and continues training with a low backbone LR.
 
-Data loading uses utils.build_mixed_train_val_splits(): set TRAIN_VAL_MANIFEST and
-HF_BATCH01_*/HF_BATCH02_* the same as for stage-1 training (val = validate.py holdout only).
+Data loading uses utils.build_mixed_train_val_splits(): set
+``SPLIT_MANIFEST_DIR=splits/<name>/`` the same as for stage-1 training.
 
 Usage (from repo root or from this directory):
   python multihead/finetune.py
@@ -50,11 +50,7 @@ from utils.checkpointing import (
     save_wandb_file_artifact,
 )
 from utils.data import AudioDataset, build_label_encoders, compute_class_weights
-from utils.data_loading import (
-    KAZEMO_MAX_SAMPLES,
-    USE_KAZEMO,
-    build_mixed_train_val_splits,
-)
+from utils.data_loading import build_mixed_train_val_splits
 from utils.finetune_utils import (
     build_optimizer,
     describe_frozen_state,
@@ -331,27 +327,8 @@ def main() -> None:
     processor = build_feature_extractor(_pretrained)
 
     print("Dataset composition:")
-    _mode = composition.get("mode")
-    if _mode == "split_manifest":
-        print(f"  Mode: split_manifest ({composition['manifest_dir']})")
-        print(f"  Test total: {composition.get('test_total', 0)}")
-    elif _mode == "holdout_manifest":
-        print("  Mode: holdout_manifest (val = validate.py subset only, no leakage into train)")
-        print(f"  Manifest: {composition['manifest']}")
-        print(
-            f"  batch01 train-only / val holdout: {composition['batch01_train_only']} / {composition['hf_val']}"
-        )
-        print(f"  batch02 train-only (full split): {composition['batch02_train_only']}")
-    if "hf_train" in composition:
-        print(f"  HF train/val: {composition['hf_train']} / {composition['hf_val']}")
-    if "kazemo_train" in composition:
-        print(
-            f"  Kazemo train/val (cap={KAZEMO_MAX_SAMPLES}, enabled={USE_KAZEMO}): "
-            f"{composition['kazemo_train']} / {composition['kazemo_val']}"
-        )
-    if composition.get("kazemo_emotion_counts"):
-        emo_counts = ", ".join([f"{k}:{v}" for k, v in composition["kazemo_emotion_counts"].items()])
-        print(f"  Kazemo selected emotion counts: {emo_counts}")
+    print(f"  Mode: split_manifest ({composition['manifest_dir']})")
+    print(f"  Test total: {composition.get('test_total', 0)}")
     print(f"  Mixed train/val total: {composition['train_total']} / {composition['val_total']}")
     print(
         f"  Train labels present: emotion={composition['train_label_counts']['emotion']}, "

@@ -1,9 +1,8 @@
 """Extract the `augmented` flag from a raw HF row.
 
-Matches the permissive logic in eval/validate.py::_is_non_augmented: the flag
-may appear at the top level (`augmented` / `is_augmented`) or nested under a
-`metadata` dict or JSON string. Returns None when the column is absent so the
-caller can distinguish "not augmented" from "don't know".
+The flag may appear at the top level (`augmented` / `is_augmented`) or nested
+under a `metadata` dict or JSON string. Returns None when the column is absent
+so the caller can distinguish "not augmented" from "don't know".
 """
 
 from __future__ import annotations

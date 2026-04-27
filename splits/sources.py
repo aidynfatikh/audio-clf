@@ -38,7 +38,7 @@ def _str_or_none(v: Any) -> str | None:
 
 
 def _row_id_for_hf(row: dict[str, Any], idx: int) -> str:
-    """Match eval/validation_holdout.row_hf_id — always returns str."""
+    """Stable per-row id derived from id/uid columns; falls back to index."""
     return str(row.get("id", row.get("uid", f"row-{idx}")))
 
 

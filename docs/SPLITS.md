@@ -16,20 +16,14 @@ This doc covers:
 
 ---
 
-## 1. Three ways the training loader can get a train/val/test
+## 1. How the training loader gets a train/val/test
 
-`utils/data_loading.py::build_mixed_train_val_splits()` dispatches by env var:
-
-| Env var              | Mode                 | Speaker-disjoint? | Recommended? |
-|----------------------|----------------------|-------------------|--------------|
-| `SPLIT_MANIFEST_DIR` | Manifest mode        | **Yes**           | **Yes — default for all real runs.** |
-| `TRAIN_VAL_MANIFEST` | Legacy holdout mode  | No (row-id only)  | Only for reproducing old validate.py runs. |
-| (neither set)        | HF-split fallback    | No                | Smoke tests only. |
-
-Only the **manifest mode** builds splits the way this doc describes. The other
-two paths predate the builder and split by row_id — a single speaker can land in
-both train and val. Set `SPLIT_MANIFEST_DIR=splits/batch01_only_v1` (or the
-split directory you materialized) for anything you intend to publish.
+`utils/data_loading.py::build_mixed_train_val_splits()` requires
+`SPLIT_MANIFEST_DIR=splits/<name>/` to point to a directory built by
+`scripts/build_splits.py`. There is no fallback — a missing or empty
+`SPLIT_MANIFEST_DIR` raises immediately. (Older `TRAIN_VAL_MANIFEST` and
+HF-split fallback paths were removed; both split by row_id rather than
+speaker, so a single speaker could land in both train and val.)
 
 ---
 
@@ -342,5 +336,3 @@ When you use `SPLIT_MANIFEST_DIR` + a config with `speaker_disjoint: true`:
   (`train_only`). Rows without speaker attribution are dropped under
   `train_only` to avoid silent leakage.
 
-When you use `TRAIN_VAL_MANIFEST` or the plain HF-split fallback, none of the
-above guarantees hold — only row-id exclusion. Use manifest mode.
