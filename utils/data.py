@@ -95,22 +95,16 @@ class AudioDataset(TorchDataset):
 
         if len(audio_data) > self.max_length:
             audio_data = audio_data[: self.max_length]
-        else:
-            audio_data = np.pad(audio_data, (0, self.max_length - len(audio_data)))
+        raw_length = len(audio_data)
+        if raw_length < self.max_length:
+            audio_data = np.pad(audio_data, (0, self.max_length - raw_length))
 
         inputs = self.processor(
             audio_data,
             sampling_rate=SAMPLE_RATE,
             return_tensors="pt",
-            padding=True,
-            return_attention_mask=True,
         )
         input_values = inputs.input_values.squeeze(0)
-        attention_mask = getattr(inputs, "attention_mask", None)
-        if attention_mask is not None:
-            attention_mask = attention_mask.squeeze(0)
-        else:
-            attention_mask = torch.ones(input_values.shape, dtype=torch.long)
 
         def norm(v):
             return str(v).strip() if (v is not None and str(v).strip()) else None
@@ -125,7 +119,7 @@ class AudioDataset(TorchDataset):
 
         return {
             "input_values": input_values,
-            "attention_mask": attention_mask,
+            "input_length": torch.tensor(raw_length, dtype=torch.long),
             "emotion": torch.tensor(
                 self.emotion_encoder.get(emotion_normalized, -100) if has_emotion else -100,
                 dtype=torch.long,

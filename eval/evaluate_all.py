@@ -102,7 +102,10 @@ def _score_one(model, loader, device) -> dict:
     ce = torch.nn.CrossEntropyLoss(reduction="sum", ignore_index=-100)
     for batch in loader:
         x = batch["input_values"].to(device, non_blocking=True)
-        emo_l, gen_l, age_l = model(x)
+        il = batch.get("input_length")
+        if il is not None:
+            il = il.to(device, non_blocking=True)
+        emo_l, gen_l, age_l = model(x, input_lengths=il)
         for t, logits in zip(TASKS, (emo_l, gen_l, age_l)):
             y = batch[t].to(device, non_blocking=True)
             mask = y != -100

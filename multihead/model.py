@@ -20,18 +20,28 @@ def _family(backbone_name: str) -> str:
     raise ValueError(f"Unknown backbone '{backbone_name}'. Known: {list(_BACKBONES)}")
 
 
-def _weighted_pool(all_layers: torch.Tensor, layer_weights: torch.Tensor) -> torch.Tensor:
-    """Softmax-weighted sum over hidden layers, then mean-pool over time.
+def _weighted_pool(
+    all_layers: torch.Tensor,
+    layer_weights: torch.Tensor,
+    time_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Softmax-weighted sum over hidden layers, then masked mean-pool over time.
 
     Args:
         all_layers:    [num_layers, B, T, H]  – stacked hidden states
         layer_weights: [num_layers]           – learnable unnormalised weights
+        time_mask:     [B, T] bool, True for valid frames. If None, plain mean.
     Returns:
         [B, H] pooled features
     """
     w = torch.softmax(layer_weights, dim=0)
     pooled = (w.view(-1, 1, 1, 1) * all_layers).sum(dim=0)  # [B, T, H]
-    return pooled.mean(dim=1)                                # [B, H]
+    if time_mask is None:
+        return pooled.mean(dim=1)
+    m = time_mask.to(pooled.dtype).unsqueeze(-1)            # [B, T, 1]
+    summed = (pooled * m).sum(dim=1)                        # [B, H]
+    denom = m.sum(dim=1).clamp(min=1.0)                     # [B, 1]
+    return summed / denom
 
 
 class MultiTaskBackbone(nn.Module):
@@ -102,8 +112,12 @@ class MultiTaskBackbone(nn.Module):
             nn.Linear(256, num_ages),
         )
 
-    def forward(self, input_values, attention_mask=None):
-        outputs = self.backbone(input_values, attention_mask=attention_mask)
+    def forward(self, input_values, input_lengths=None):
+        # NOTE: deliberately not passing attention_mask to the backbone — base
+        # HuBERT/WavLM (feat_extract_norm="group") were pretrained without one,
+        # and passing one shifts the pretrained activation distribution. The
+        # padding mask only matters at the pooling stage.
+        outputs = self.backbone(input_values)
 
         # Frozen backbone: stack once under no_grad. Heads/layer_weights still get grads.
         # Unfrozen (any param trainable): keep the graph so the backbone receives gradients.
@@ -114,9 +128,17 @@ class MultiTaskBackbone(nn.Module):
         else:
             all_layers = torch.stack(outputs.hidden_states, dim=0)
 
-        emo_feats = _weighted_pool(all_layers, self.emotion_weights)
-        gen_feats = _weighted_pool(all_layers, self.gender_weights)
-        age_feats = _weighted_pool(all_layers, self.age_weights)
+        time_mask = None
+        if input_lengths is not None:
+            T = all_layers.shape[2]
+            feat_lengths = self.backbone._get_feat_extract_output_lengths(input_lengths)
+            feat_lengths = feat_lengths.to(input_values.device).long().clamp(max=T)
+            idx = torch.arange(T, device=input_values.device).unsqueeze(0)  # [1, T]
+            time_mask = idx < feat_lengths.unsqueeze(1)                     # [B, T]
+
+        emo_feats = _weighted_pool(all_layers, self.emotion_weights, time_mask)
+        gen_feats = _weighted_pool(all_layers, self.gender_weights, time_mask)
+        age_feats = _weighted_pool(all_layers, self.age_weights, time_mask)
 
         return (
             self.emotion_head(emo_feats),

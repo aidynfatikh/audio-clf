@@ -57,6 +57,7 @@ from utils.misc import (
 )
 from utils.training import (
     _wandb_val_keys,
+    best_model_score,
     evaluate_and_save_test_results,
     filter_val_metrics,
     make_batch_end_handler,
@@ -82,6 +83,8 @@ LABEL_SMOOTHING = float(_tcfg.get("label_smoothing", 0.1))
 CLASS_WEIGHTING = str(_tcfg.get("class_weighting", "none")).strip().lower()
 WEIGHT_DECAY = float(_tcfg.get("weight_decay", 0.01))
 _SCHED = _tcfg.get("scheduler", {})
+_BEST = CFG.get("best_model", {}) or {}
+BEST_METRIC = str(_BEST.get("metric", "mean_accuracy")).strip().lower()
 
 # When the backbone is *not* frozen we build a discriminative-LR optimizer
 # over every backbone layer + the heads (full-finetune-from-epoch-0 regime).
@@ -283,7 +286,10 @@ def main():
     metrics_path = MODEL_DIR / "training_metrics.json"
     latest_path = MODEL_DIR / "latest_checkpoint.pt"
     step_ckpt_dir = MODEL_DIR / "steps"
-    train_state = {'best_val_loss': float('inf')}
+    # `best_score` direction depends on metric (higher is better for accuracy;
+    # lower for loss). Init to the worst possible value for the chosen metric.
+    _init_best = float('-inf') if BEST_METRIC == "mean_accuracy" else float('inf')
+    train_state = {'best_score': _init_best, 'best_metric': BEST_METRIC}
     all_metrics = []
     all_step_val_metrics: list[dict] = []
     step_val_metrics_path = MODEL_DIR / "step_val_metrics.json"
@@ -303,7 +309,9 @@ def main():
                 and ckpt["epoch"] + 1 < NUM_EPOCHS):
             model.load_state_dict(ckpt["model_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-            train_state['best_val_loss'] = ckpt.get("best_val_loss", float("inf"))
+            if ckpt.get("best_metric") == BEST_METRIC:
+                train_state['best_score'] = ckpt.get("best_score", _init_best)
+            # else: metric changed — start best fresh so we don't compare apples/oranges
             start_epoch = ckpt["epoch"] + 1
             step_state['global_step'] = int(ckpt.get('global_step', 0))
             step_state['samples_seen'] = int(ckpt.get('samples_seen', 0))
@@ -463,9 +471,12 @@ def main():
             if "age" in _tasks:
                 _acc_line += f"  Age: {_vm['age_acc']:.4f}"
             print(_acc_line)
-        # Sum of per-corpus val totals drives best-model / early-stopping.
-        # Not logged as a metric — only per-corpus val losses are stored.
-        val_metrics = {"total": sum(m["total"] for m in all_val_metrics.values())}
+        # Best-model selection / early-stopping uses the configured metric
+        # (mean_accuracy by default; val_loss available for ablations).
+        score, higher_is_better = best_model_score(all_val_metrics, named_val_tasks, BEST_METRIC)
+        val_loss_total = float(sum(m["total"] for m in all_val_metrics.values()))
+        wandb_epoch_data['val/score'] = float(score)
+        wandb_epoch_data['val/loss_total'] = val_loss_total
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if _utils_misc.stop_requested:
@@ -490,8 +501,9 @@ def main():
             json.dump(all_metrics, f, indent=2)
         print(f"Saved metrics to {metrics_path}")
 
-        if val_metrics['total'] < train_state['best_val_loss']:
-            train_state['best_val_loss'] = val_metrics['total']
+        improved = (score > train_state['best_score']) if higher_is_better else (score < train_state['best_score'])
+        if improved:
+            train_state['best_score'] = score
             epochs_without_improvement = 0
             model_path = MODEL_DIR / "best_model.pt"
             torch.save({
@@ -500,17 +512,19 @@ def main():
                 'samples_seen': step_state['samples_seen'],
                 'model_state_dict': unwrap(model).state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': train_state['best_val_loss'],
+                'best_score': float(train_state['best_score']),
+                'best_metric': BEST_METRIC,
+                'val_loss_total': val_loss_total,
                 'num_emotions': num_emotions,
                 'num_genders': num_genders,
                 'num_ages': num_ages,
                 **_ckpt_extra,
             }, model_path)
-            print(f"Saved best model to {model_path}")
+            print(f"Saved best model ({BEST_METRIC}={score:.4f}) to {model_path}")
         else:
             epochs_without_improvement += 1
             if EARLY_STOPPING_ENABLED and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-                print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+                print(f"\nEarly stopping: no {BEST_METRIC} improvement for {EARLY_STOPPING_PATIENCE} epochs.")
                 break
 
         scheduler.step()
@@ -523,7 +537,8 @@ def main():
             'model_state_dict': unwrap(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
-            'best_val_loss': train_state['best_val_loss'],
+            'best_score': float(train_state['best_score']),
+            'best_metric': BEST_METRIC,
             'num_emotions': num_emotions,
             'num_genders': num_genders,
             'num_ages': num_ages,
@@ -534,12 +549,12 @@ def main():
         print("\nStopped by user.")
     else:
         print("\nTraining completed!")
-    print(f"Best validation loss: {train_state['best_val_loss']:.4f}")
+    print(f"Best {BEST_METRIC}: {train_state['best_score']:.4f}")
 
     if not _utils_misc.stop_requested and composition.get("mode") == "split_manifest":
         try:
             from splits.materialize import materialize_named_test
-            _test_per_corpus = materialize_named_test(Path(composition["manifest_dir"]))
+            _test_per_corpus = materialize_named_test(Path(composition["eval_manifest_dir"]))
             _test_tasks = {n: set(_ALL_TASKS) for n in _test_per_corpus}
             if "kazemo" in _test_tasks:
                 from utils.training import _KAZEMO_TASKS

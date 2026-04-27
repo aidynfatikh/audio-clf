@@ -151,11 +151,12 @@ class KazEmoEmotionDataset(Dataset):
             audio_data = audio_data.astype(np.float32)
         if len(audio_data) > self.max_length:
             audio_data = audio_data[: self.max_length]
-        else:
-            audio_data = np.pad(audio_data, (0, self.max_length - len(audio_data)))
+        raw_length = len(audio_data)
+        if raw_length < self.max_length:
+            audio_data = np.pad(audio_data, (0, self.max_length - raw_length))
 
         inputs = self.processor(
-            audio_data, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True
+            audio_data, sampling_rate=SAMPLE_RATE, return_tensors="pt",
         )
         input_values = inputs.input_values.squeeze(0)
 
@@ -169,6 +170,7 @@ class KazEmoEmotionDataset(Dataset):
 
         return {
             "input_values": input_values,
+            "input_length": torch.tensor(raw_length, dtype=torch.long),
             "emotion": torch.tensor(emotion_label, dtype=torch.long),
         }
 
@@ -182,7 +184,11 @@ def evaluate_emotion(model, loader: DataLoader, id2emotion: dict[int, str], devi
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Evaluating", unit="batch"):
-            logits, _, _ = model(batch["input_values"].to(device))
+            _iv = batch["input_values"].to(device)
+            _il = batch.get("input_length")
+            if _il is not None:
+                _il = _il.to(device)
+            logits, _, _ = model(_iv, input_lengths=_il)
             preds = logits.argmax(1)
             top2 = logits.topk(k=min(2, logits.size(-1)), dim=1).indices
             gts = batch["emotion"].to(device)

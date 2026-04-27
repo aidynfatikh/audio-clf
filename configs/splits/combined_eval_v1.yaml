@@ -53,7 +53,9 @@ corpora:
     max_per_speaker: null
     speaker_selection:
       strategy: valtest_all
-    valtest_ratio: {val: 0.0, test: 1.0}
+    # builder requires both > 0; the val slice is unused by evaluate_all.py
+    # (it materialises only the `test` split) so we keep val tiny.
+    valtest_ratio: {val: 0.01, test: 0.99}
 
 checks:
   fail_on_speaker_overlap: true

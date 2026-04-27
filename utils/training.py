@@ -38,6 +38,27 @@ def _wandb_val_keys(prefix: str, metrics: dict) -> dict:
     return {f"{prefix}/{_VAL_METRIC_TO_WANDB[k]}": float(v) for k, v in metrics.items()}
 
 
+def compute_mean_accuracy(all_val_metrics: dict, named_val_tasks: dict) -> float:
+    """Macro-mean: mean over corpora of (mean over corpus-tasks of accuracy)."""
+    corpus_means = []
+    for name, vm in all_val_metrics.items():
+        tasks = named_val_tasks.get(name, _ALL_TASKS)
+        accs = [float(vm[f"{t}_acc"]) for t in tasks if f"{t}_acc" in vm]
+        if accs:
+            corpus_means.append(sum(accs) / len(accs))
+    return sum(corpus_means) / len(corpus_means) if corpus_means else 0.0
+
+
+def best_model_score(all_val_metrics: dict, named_val_tasks: dict, metric: str) -> tuple[float, bool]:
+    """Return (score, higher_is_better) for the configured selection metric."""
+    m = (metric or "mean_accuracy").strip().lower()
+    if m == "mean_accuracy":
+        return compute_mean_accuracy(all_val_metrics, named_val_tasks), True
+    if m == "val_loss":
+        return float(sum(v["total"] for v in all_val_metrics.values())), False
+    raise ValueError(f"best_model.metric must be 'mean_accuracy' or 'val_loss', got {metric!r}")
+
+
 def filter_val_metrics(metrics: dict, tasks) -> dict:
     """Return a copy of *metrics* with only the keys relevant to *tasks*."""
     out: dict = {
@@ -85,9 +106,9 @@ def train_epoch(
         if _misc.stop_requested:
             break
         input_values = batch["input_values"].to(device, non_blocking=True)
-        attention_mask = batch.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(device, non_blocking=True)
+        input_lengths = batch.get("input_length")
+        if input_lengths is not None:
+            input_lengths = input_lengths.to(device, non_blocking=True)
         emotion_labels = batch["emotion"].to(device, non_blocking=True)
         gender_labels = batch["gender"].to(device, non_blocking=True)
         age_labels = batch["age"].to(device, non_blocking=True)
@@ -99,7 +120,7 @@ def train_epoch(
 
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
             emotion_logits, gender_logits, age_logits = model(
-                input_values, attention_mask=attention_mask
+                input_values, input_lengths=input_lengths
             )
             per_task_losses: dict = {}
             active_weight = 0.0
@@ -203,9 +224,9 @@ def validate(
             if _misc.stop_requested:
                 break
             input_values = batch["input_values"].to(device, non_blocking=True)
-            attention_mask = batch.get("attention_mask")
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(device, non_blocking=True)
+            input_lengths = batch.get("input_length")
+            if input_lengths is not None:
+                input_lengths = input_lengths.to(device, non_blocking=True)
             emotion_labels = batch["emotion"].to(device, non_blocking=True)
             gender_labels = batch["gender"].to(device, non_blocking=True)
             age_labels = batch["age"].to(device, non_blocking=True)
@@ -215,7 +236,7 @@ def validate(
 
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
                 emotion_logits, gender_logits, age_logits = model(
-                    input_values, attention_mask=attention_mask
+                    input_values, input_lengths=input_lengths
                 )
                 per_task_losses: dict = {}
                 active_weight = 0.0
@@ -441,7 +462,8 @@ def make_batch_end_handler(
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                best_val_loss=train_state["best_val_loss"],
+                best_score=train_state["best_score"],
+                best_metric=train_state.get("best_metric", "mean_accuracy"),
                 num_emotions=num_emotions,
                 num_genders=num_genders,
                 num_ages=num_ages,
@@ -459,7 +481,8 @@ def make_batch_end_handler(
                     "model_state_dict": unwrap(model).state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
-                    "best_val_loss": train_state["best_val_loss"],
+                    "best_score": train_state["best_score"],
+                    "best_metric": train_state.get("best_metric", "mean_accuracy"),
                     "num_emotions": num_emotions,
                     "num_genders": num_genders,
                     "num_ages": num_ages,

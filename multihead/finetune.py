@@ -73,6 +73,7 @@ from utils.misc import (
 )
 from utils.training import (
     _wandb_val_keys,
+    best_model_score,
     evaluate_and_save_test_results,
     filter_val_metrics,
     make_batch_end_handler,
@@ -113,6 +114,8 @@ INIT_FROM = str(_ftcfg.get("init_from", "") or "")
 ANALYZE_ONLY = "--analyze" in sys.argv
 EARLY_STOPPING_ENABLED = bool(_tcfg.get("early_stopping", False))
 EARLY_STOPPING_PATIENCE = int(_tcfg["early_stopping_patience"])
+_BEST = CFG.get("best_model", {}) or {}
+BEST_METRIC = str(_BEST.get("metric", "mean_accuracy")).strip().lower()
 
 _RT = CFG["runtime"]
 NUM_CHECKPOINTS = _RT["num_checkpoints"]
@@ -249,7 +252,8 @@ def main() -> None:
         ),
     )
 
-    train_state = {'best_val_loss': float("inf")}
+    _init_best = float('-inf') if BEST_METRIC == "mean_accuracy" else float('inf')
+    train_state = {'best_score': _init_best, 'best_metric': BEST_METRIC}
     all_metrics: list[dict] = []
     all_step_val_metrics: list[dict] = []
     step_val_metrics_path = FINETUNE_DIR / "step_val_metrics_finetune.json"
@@ -264,7 +268,8 @@ def main() -> None:
 
     if _is_finetune_resume:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        train_state['best_val_loss'] = ckpt.get("best_val_loss", float("inf"))
+        if ckpt.get("best_metric") == BEST_METRIC:
+            train_state['best_score'] = ckpt.get("best_score", _init_best)
         start_epoch = ckpt["epoch"] + 1
         step_state['global_step'] = int(ckpt.get('global_step', 0))
         step_state['samples_seen'] = int(ckpt.get('samples_seen', 0))
@@ -495,7 +500,10 @@ def main() -> None:
             if "age" in _tasks:
                 _acc_line += f"  Age: {_vm['age_acc']:.4f}"
             print(_acc_line)
-        val_metrics = {"total": sum(m["total"] for m in all_val_metrics.values())}
+        score, higher_is_better = best_model_score(all_val_metrics, named_val_tasks, BEST_METRIC)
+        val_loss_total = float(sum(m["total"] for m in all_val_metrics.values()))
+        wandb_epoch_data['val/score'] = float(score)
+        wandb_epoch_data['val/loss_total'] = val_loss_total
         if wandb_run is not None:
             wandb_run.log(wandb_epoch_data, step=step_state['global_step'])
         if _utils_misc.stop_requested:
@@ -520,8 +528,9 @@ def main() -> None:
         with open(metrics_path, "w") as f:
             json.dump(all_metrics, f, indent=2)
 
-        if val_metrics["total"] < train_state['best_val_loss']:
-            train_state['best_val_loss'] = val_metrics["total"]
+        improved = (score > train_state['best_score']) if higher_is_better else (score < train_state['best_score'])
+        if improved:
+            train_state['best_score'] = score
             epochs_without_improvement = 0
             torch.save({
                 "epoch": epoch,
@@ -529,18 +538,20 @@ def main() -> None:
                 'samples_seen': step_state['samples_seen'],
                 "model_state_dict": unwrap(model).state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "val_loss": train_state['best_val_loss'],
+                "best_score": float(train_state['best_score']),
+                "best_metric": BEST_METRIC,
+                "val_loss_total": val_loss_total,
                 "num_emotions": num_emotions,
                 "num_genders": num_genders,
                 "num_ages": num_ages,
                 "unfrozen_layers": sorted(layers_to_unfreeze),
                 **_ckpt_extra,
             }, best_model_path)
-            print(f"  ✓ New best val loss: {train_state['best_val_loss']:.4f} → saved to {best_model_path.name}")
+            print(f"  ✓ New best ({BEST_METRIC}={score:.4f}) → saved to {best_model_path.name}")
         else:
             epochs_without_improvement += 1
             if EARLY_STOPPING_ENABLED and epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-                print(f"\nEarly stopping: no val loss improvement for {EARLY_STOPPING_PATIENCE} epochs.")
+                print(f"\nEarly stopping: no {BEST_METRIC} improvement for {EARLY_STOPPING_PATIENCE} epochs.")
                 break
 
         scheduler.step()
@@ -553,7 +564,8 @@ def main() -> None:
             "model_state_dict": unwrap(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
-            "best_val_loss": train_state['best_val_loss'],
+            "best_score": float(train_state['best_score']),
+            "best_metric": BEST_METRIC,
             "num_emotions": num_emotions,
             "num_genders": num_genders,
             "num_ages": num_ages,
@@ -564,12 +576,12 @@ def main() -> None:
         print("\nStopped by user.")
     else:
         print("\nFine-tuning complete!")
-    print(f"Best validation loss: {train_state['best_val_loss']:.4f}")
+    print(f"Best {BEST_METRIC}: {train_state['best_score']:.4f}")
 
     if not _utils_misc.stop_requested and composition.get("mode") == "split_manifest":
         try:
             from splits.materialize import materialize_named_test
-            _test_per_corpus = materialize_named_test(Path(composition["manifest_dir"]))
+            _test_per_corpus = materialize_named_test(Path(composition["eval_manifest_dir"]))
             _test_tasks = {n: set(_ALL_TASKS) for n in _test_per_corpus}
             if "kazemo" in _test_tasks:
                 from utils.training import _KAZEMO_TASKS

@@ -177,13 +177,15 @@ def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[PredictBatch, di
     torch_device = torch.device(device)
 
     def predict_batch(wavs: list[np.ndarray]) -> list[str]:
+        raw_lengths = [min(len(w), MAX_AUDIO_SAMPLES) for w in wavs]
         fitted = [_fit_length(w) for w in wavs]
         inputs = processor(
             fitted, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True,
         )
         iv = inputs.input_values.to(torch_device)
+        il = torch.tensor(raw_lengths, dtype=torch.long, device=torch_device)
         with torch.no_grad():
-            emo_logits, _, _ = model(iv)
+            emo_logits, _, _ = model(iv, input_lengths=il)
         idxs = emo_logits.argmax(dim=1).tolist()
         return [id2emotion[int(i)] for i in idxs]
 

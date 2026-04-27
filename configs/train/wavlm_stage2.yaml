@@ -48,6 +48,12 @@ checkpointing:
 validation:
   num_validations: 5
 
+best_model:
+  # mean_accuracy: macro-mean of (per-corpus, per-task) accuracies on the
+  # shared val set (EVAL_MANIFEST_DIR). Higher is better.
+  # val_loss: legacy sum of per-corpus val losses. Lower is better.
+  metric: mean_accuracy
+
 compile:
   enabled: true
   mode: default

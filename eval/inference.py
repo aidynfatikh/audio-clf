@@ -167,7 +167,11 @@ def main():
     emotion_correct = gender_correct = age_correct = total = 0
     with torch.no_grad():
         for batch in loader:
-            emotion_logits, gender_logits, age_logits = model(batch["input_values"].to(DEVICE))
+            _iv = batch["input_values"].to(DEVICE)
+            _il = batch.get("input_length")
+            if _il is not None:
+                _il = _il.to(DEVICE)
+            emotion_logits, gender_logits, age_logits = model(_iv, input_lengths=_il)
             emotion_correct += (emotion_logits.argmax(1) == batch["emotion"].to(DEVICE)).sum().item()
             gender_correct  += (gender_logits.argmax(1)  == batch["gender"].to(DEVICE)).sum().item()
             age_correct     += (age_logits.argmax(1)     == batch["age"].to(DEVICE)).sum().item()

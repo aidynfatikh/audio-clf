@@ -73,7 +73,8 @@ def _peek_checkpoint_meta(path: Path) -> dict:
     except Exception:
         return {}
     out = {}
-    for k in ("epoch", "global_step", "samples_seen", "val_loss", "best_val_loss"):
+    for k in ("epoch", "global_step", "samples_seen", "val_loss", "best_val_loss",
+              "best_score", "best_metric", "val_loss_total"):
         if k in ckpt:
             out[k] = ckpt[k]
     return out
@@ -185,7 +186,9 @@ def print_training_summary(
             extra.append(f"samples_seen={meta['samples_seen']:,}")
         if meta.get("val_loss") is not None:
             extra.append(f"val_loss={meta['val_loss']:.6f}")
-        if meta.get("best_val_loss") is not None:
+        if meta.get("best_score") is not None and meta.get("best_metric"):
+            extra.append(f"best_{meta['best_metric']}={meta['best_score']:.6f}")
+        elif meta.get("best_val_loss") is not None:
             extra.append(f"best_val_loss={meta['best_val_loss']:.6f}")
         tail = "  " + "  ".join(extra) if extra else ""
         print(f"    {label}: {ep_human}{tail}")
@@ -487,7 +490,11 @@ def evaluate_checkpoint(ckpt_path: Path, loader: DataLoader,
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="  batches", leave=False, unit="batch"):
-            e_out, g_out, a_out = model(batch["input_values"].to(device))
+            _iv = batch["input_values"].to(device)
+            _il = batch.get("input_length")
+            if _il is not None:
+                _il = _il.to(device)
+            e_out, g_out, a_out = model(_iv, input_lengths=_il)
             for task, logits, gt_key in [
                 ("emotion", e_out, "emotion"),
                 ("gender",  g_out, "gender"),
