@@ -201,9 +201,9 @@ def _build_our_predictor(ckpt_path: Path, device: str) -> tuple[PredictBatch, di
 
 # ── Gemini API predictor ────────────────────────────────────────────────────
 
-# Emotion label set exposed to Gemini / Qwen. Excludes "other" and "unknown"
-# so the model is forced into a real class; parse failures still fall back to
-# "unknown" which is already in UNMAPPED_PRED.
+# Default label set when a dataset's classes can't be inferred. Excludes
+# "other" / "unknown" so the model is forced into a real class; parse failures
+# still fall back to "unknown" which is already in UNMAPPED_PRED.
 _STRICT_EMOTIONS = ("angry", "disgusted", "fearful", "happy",
                     "neutral", "sad", "surprised")
 
@@ -218,16 +218,62 @@ _LABEL_ALIASES = {
 }
 
 
-def _normalize_free_text_label(raw: str) -> str:
+def _canonicalise(raw: str) -> str | None:
     s = str(raw).strip().lower().strip(".,!?\"' ")
-    # Try the whole string first, then first word (handles "happy." or "Happy voice").
     for candidate in (s, s.split()[0] if s.split() else s):
         if candidate in _LABEL_ALIASES:
             return _LABEL_ALIASES[candidate]
-    return "unknown"
+    return None
 
 
-def _build_gemini_predictor(model_id: str, concurrency: int) -> tuple[PredictBatch, dict]:
+def _normalize_free_text_label(raw: str, allowed: set[str] | None = None) -> str:
+    """Map a free-text model output to a canonical label.
+
+    If `allowed` is given, the result must be in that set; anything else is
+    coerced to "unknown". This is the safety net for the LLM legs — even with
+    structured-response and prompt-level constraints, parse-fails or off-spec
+    outputs land here.
+    """
+    canon = _canonicalise(raw)
+    if canon is None:
+        return "unknown"
+    if allowed is not None and canon not in allowed:
+        return "unknown"
+    return canon
+
+
+def _emotion_classes_from_dataset(per_corpus: dict) -> tuple[str, ...]:
+    """Collect the unique emotion classes that actually appear in the eval data.
+
+    Pulled from each corpus's `emotion` column, canonicalised through the alias
+    map, deduped, and sorted. This is what gets shown to the LLMs as the
+    permissible class set, so the prompt/enum exactly matches what the dataset
+    uses — no extra classes, no missing ones.
+    """
+    seen: set[str] = set()
+    for ds in per_corpus.values():
+        cols = getattr(ds, "column_names", None)
+        if cols is None or "emotion" not in cols:
+            continue
+        no_audio = ds.remove_columns(["audio"]) if "audio" in cols else ds
+        for row in no_audio:
+            v = row.get("emotion")
+            if v is None:
+                continue
+            canon = _canonicalise(v)
+            if canon is not None:
+                seen.add(canon)
+    if not seen:
+        return _STRICT_EMOTIONS
+    # Deterministic order — matters for the Gemini Enum schema cache key.
+    return tuple(sorted(seen))
+
+
+def _build_gemini_predictor(
+    model_id: str,
+    concurrency: int,
+    classes: tuple[str, ...] = _STRICT_EMOTIONS,
+) -> tuple[PredictBatch, dict]:
     try:
         from google import genai
         from google.genai import types
@@ -248,16 +294,25 @@ def _build_gemini_predictor(model_id: str, concurrency: int) -> tuple[PredictBat
         raise SystemExit("GEMINI_API_KEY not set (add to .env or env).")
     client = genai.Client(api_key=api_key)
 
+    allowed = set(classes)
     Emotion = _enum.Enum(
-        "Emotion", {e.upper(): e for e in _STRICT_EMOTIONS},
+        "Emotion", {e.upper(): e for e in classes},
     )
+    # Gemini 3.x: `thinking_budget` is deprecated; use `thinking_level`.
+    # "low" gives the lowest-latency / lowest-cost reasoning setting, which is
+    # what we want for a single-label classification call.
     gen_config = types.GenerateContentConfig(
         response_mime_type="text/x.enum",
         response_schema=Emotion,
         temperature=0.0,
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        thinking_config=types.ThinkingConfig(thinking_level="low"),
     )
-    prompt = "Listen to this short utterance and classify the speaker's emotion."
+    class_list = ", ".join(classes)
+    prompt = (
+        "Listen to this short utterance and classify the speaker's emotion. "
+        f"Choose exactly ONE label from this set: {class_list}. "
+        "Do not output any other label."
+    )
 
     def predict_one(wav: np.ndarray) -> str:
         buf = io.BytesIO()
@@ -271,7 +326,7 @@ def _build_gemini_predictor(model_id: str, concurrency: int) -> tuple[PredictBat
                 contents=[audio_part, prompt],
                 config=gen_config,
             )
-            return _normalize_free_text_label(resp.text or "unknown")
+            return _normalize_free_text_label(resp.text or "unknown", allowed=allowed)
         except Exception as e:
             # Don't let one 5xx / timeout nuke the run; log once per batch.
             sys.stderr.write(f"[gemini] error: {type(e).__name__}: {e}\n")
@@ -286,14 +341,18 @@ def _build_gemini_predictor(model_id: str, concurrency: int) -> tuple[PredictBat
         "kind": "gemini",
         "model": model_id,
         "concurrency": concurrency,
-        "emotion_classes": list(_STRICT_EMOTIONS),
+        "emotion_classes": list(classes),
     }
     return predict_batch, meta
 
 
 # ── Qwen2-Audio local predictor ─────────────────────────────────────────────
 
-def _build_qwen_predictor(model_id: str, device: str) -> tuple[PredictBatch, dict]:
+def _build_qwen_predictor(
+    model_id: str,
+    device: str,
+    classes: tuple[str, ...] = _STRICT_EMOTIONS,
+) -> tuple[PredictBatch, dict]:
     try:
         import torch
         from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration
@@ -309,14 +368,20 @@ def _build_qwen_predictor(model_id: str, device: str) -> tuple[PredictBatch, dic
         model_id, torch_dtype=dtype, device_map=device,
     ).eval()
 
-    emotion_list = ", ".join(_STRICT_EMOTIONS)
+    allowed = set(classes)
+    emotion_list = ", ".join(classes)
     conversation_template = [
+        {"role": "system", "content": [
+            {"type": "text",
+             "text": f"You are a strict speech-emotion classifier. The ONLY "
+                     f"valid labels are: {emotion_list}. Respond with exactly "
+                     f"one of these words and nothing else."},
+        ]},
         {"role": "user", "content": [
             {"type": "audio", "audio_url": "placeholder"},
             {"type": "text",
-             "text": f"Listen to this short utterance and classify the speaker's "
-                     f"emotion. Respond with exactly ONE word from this set: "
-                     f"{emotion_list}."},
+             "text": f"Classify the speaker's emotion. Output exactly ONE word "
+                     f"from: {emotion_list}."},
         ]},
     ]
     text_prompt = processor.apply_chat_template(
@@ -337,7 +402,7 @@ def _build_qwen_predictor(model_id: str, device: str) -> tuple[PredictBatch, dic
         text = processor.batch_decode(
             gen_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False,
         )[0]
-        return _normalize_free_text_label(text)
+        return _normalize_free_text_label(text, allowed=allowed)
 
     def predict_batch(wavs: list[np.ndarray]) -> list[str]:
         return [predict_one(w) for w in wavs]
@@ -346,7 +411,7 @@ def _build_qwen_predictor(model_id: str, device: str) -> tuple[PredictBatch, dic
         "kind": "qwen2-audio",
         "model": model_id,
         "dtype": str(dtype),
-        "emotion_classes": list(_STRICT_EMOTIONS),
+        "emotion_classes": list(classes),
     }
     return predict_batch, meta
 
@@ -568,6 +633,15 @@ def main():
     import torch
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Classes the LLMs (gemini, qwen) are allowed to output: derived directly
+    # from this dataset's emotion column so the prompt and structured-response
+    # schema match what the dataset actually uses (no extra classes, none
+    # missing). emotion2vec and our checkpoint don't use this — they have their
+    # own fixed label space.
+    dataset_classes = _emotion_classes_from_dataset(per_corpus)
+    print(f"[cmp] dataset emotion classes for LLM constraint: {list(dataset_classes)}",
+          flush=True)
+
     if args.variant:
         tag = args.variant.split("/")[-1]
         predict_batch = _build_e2v_predictor(args.variant, args.hub, device)
@@ -575,12 +649,14 @@ def main():
     elif args.gemini:
         tag = f"gemini__{args.gemini_model}"
         predict_batch, meta = _build_gemini_predictor(
-            args.gemini_model, args.gemini_concurrency,
+            args.gemini_model, args.gemini_concurrency, classes=dataset_classes,
         )
         model_meta = meta
     elif args.qwen:
         tag = f"qwen__{args.qwen_model.split('/')[-1]}"
-        predict_batch, meta = _build_qwen_predictor(args.qwen_model, device)
+        predict_batch, meta = _build_qwen_predictor(
+            args.qwen_model, device, classes=dataset_classes,
+        )
         model_meta = meta
     else:
         ckpt_path = Path(args.checkpoint).resolve()

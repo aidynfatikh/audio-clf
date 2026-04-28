@@ -120,15 +120,19 @@ def run_row_inference(row: dict, model, processor,
         audio_data = np.mean(audio_data, axis=1)
     if len(audio_data) > max_length:
         audio_data = audio_data[:max_length]
-    else:
-        audio_data = np.pad(audio_data, (0, max_length - len(audio_data)))
+    raw_length = len(audio_data)
+    if raw_length < max_length:
+        audio_data = np.pad(audio_data, (0, max_length - raw_length))
 
     inputs = processor(audio_data, sampling_rate=SAMPLE_RATE,
                        return_tensors="pt", padding=True)
     input_values = inputs.input_values.to(device)
+    input_lengths = torch.tensor([raw_length], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        emotion_logits, gender_logits, age_logits = model(input_values)
+        emotion_logits, gender_logits, age_logits = model(
+            input_values, input_lengths=input_lengths
+        )
 
     def _top(logits, id2label, k=3):
         probs = F.softmax(logits[0], dim=0)

@@ -84,7 +84,7 @@ def _save(fig, out_dir: Path, name: str) -> Path:
 
 def _fig_split_totals(summary: dict[str, Any], out_dir: Path) -> Path:
     totals = summary.get("totals", {}) or {}
-    aug = (summary.get("leak_check") or {}).get("per_split_aug_count", {}) or {}
+    aug = summary.get("augmented_totals") or (summary.get("leak_check") or {}).get("per_split_aug_count", {}) or {}
     fig, ax = plt.subplots(figsize=(6.0, 3.4))
     xs = list(SPLITS)
     aug_vals = [int(aug.get(s, 0)) for s in xs]
@@ -221,9 +221,52 @@ def _generate_figures(summary: dict[str, Any], out_dir: Path) -> dict[str, Path]
 # ---------------------------------------------------------------------------
 # Card
 # ---------------------------------------------------------------------------
+def _slim_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Distribution-only view of summary.json for public upload.
+
+    Drops config provenance, drift errors, drop-accounting, integrity/leak
+    bookkeeping. Keeps counts and the augmented breakdown.
+    """
+    per_corpus = summary.get("per_corpus", {}) or {}
+    per_corpus_aug = summary.get("per_corpus_aug_count", {}) or {}
+    if not per_corpus_aug:
+        per_corpus_aug = (summary.get("leak_check") or {}).get("per_corpus_aug_count", {}) or {}
+
+    per_split_aug: dict[str, int] = {s: 0 for s in SPLITS}
+    for c in per_corpus_aug.values():
+        for s in SPLITS:
+            per_split_aug[s] += int((c or {}).get(s, 0) or 0)
+
+    totals = summary.get("totals", {}) or {}
+    out: dict[str, Any] = {
+        "name": summary.get("name"),
+        "totals": {
+            "total": int(totals.get("total", 0)),
+            **{s: int(totals.get(s, 0)) for s in SPLITS},
+        },
+        "augmented_totals": per_split_aug,
+        "per_corpus": {
+            c: {s: int((per_corpus.get(c) or {}).get(s, 0) or 0) for s in SPLITS}
+            for c in sorted(per_corpus.keys())
+        },
+        "per_corpus_aug_count": {
+            c: {s: int((per_corpus_aug.get(c) or {}).get(s, 0) or 0) for s in SPLITS}
+            for c in sorted(per_corpus.keys())
+        },
+        "emotion_counts": summary.get("emotion_counts", {}) or {},
+        "gender_counts": summary.get("gender_counts", {}) or {},
+        "age_counts": summary.get("age_counts", {}) or {},
+        "speaker_counts": summary.get("speaker_counts", {}) or {},
+    }
+    pce = summary.get("per_corpus_emotion_counts")
+    if pce:
+        out["per_corpus_emotion_counts"] = pce
+    return out
+
+
 def _per_corpus_aug_table(summary: dict[str, Any]) -> str:
     per_corpus = summary.get("per_corpus", {}) or {}
-    aug = (summary.get("leak_check") or {}).get("per_corpus_aug_count", {}) or {}
+    aug = summary.get("per_corpus_aug_count") or (summary.get("leak_check") or {}).get("per_corpus_aug_count", {}) or {}
     if not per_corpus:
         return "_(none)_"
     lines = [
@@ -295,20 +338,14 @@ def _build_card(
     figures: dict[str, Path] | None = None,
 ) -> str:
     name = summary.get("name") or config.get("name") or repo_id.split("/")[-1]
-    seed = summary.get("seed", config.get("seed"))
     totals = summary.get("totals", {}) or {}
-    per_corpus = summary.get("per_corpus", {}) or {}
     emo = summary.get("emotion_counts", {}) or {}
     gen = summary.get("gender_counts", {}) or {}
     age = summary.get("age_counts", {}) or {}
     spk = summary.get("speaker_counts", {}) or {}
-    spk_per_cs = summary.get("speaker_counts_per_corpus_split", {}) or {}
-    dropped = summary.get("dropped_rows", {}) or {}
-    leak = summary.get("leak_check", {}) or {}
-    git_sha = summary.get("git_sha")
-    cfg_sha = summary.get("config_sha256")
 
-    aug_total = sum(int(v) for v in (leak.get("per_split_aug_count") or {}).values())
+    aug_per_split = summary.get("augmented_totals") or {}
+    aug_total = sum(int(v) for v in aug_per_split.values())
     orig_total = int(totals.get("total", 0)) - aug_total
 
     yaml_front = (
@@ -346,21 +383,6 @@ def _build_card(
     p.append("")
     p.append(_img(figures, "split_totals", "Rows per split"))
 
-    # Source corpora
-    p.append("## Source corpora\n")
-    corpora = config.get("corpora", {}) or {}
-    p.append("| corpus | mode | hf_id | aug policy | ratios |")
-    p.append("|---|---|---|---|---|")
-    for ds, ds_cfg in corpora.items():
-        ds_cfg = ds_cfg or {}
-        mode = str(ds_cfg.get("mode"))
-        hf_id = ds_cfg.get("hf_id", "_(local)_")
-        pol = ds_cfg.get("augmented_policy", "—")
-        ratios = ds_cfg.get("ratios")
-        ratios_s = ", ".join(f"{k}={v}" for k, v in ratios.items()) if ratios else "—"
-        p.append(f"| `{ds}` | `{mode}` | `{hf_id}` | `{pol}` | {ratios_s} |")
-    p.append("")
-
     # Per-corpus composition
     p.append("## Per-corpus composition\n")
     p.append(_img(figures, "per_corpus", "Per corpus × split"))
@@ -396,50 +418,6 @@ def _build_card(
     p.append("|---|---:|")
     for s in SPLITS:
         p.append(f"| {s} | {_fmt_int(spk.get(s, 0))} |")
-    if spk_per_cs:
-        p.append("")
-        p.append("**Per (corpus, split):**\n")
-        p.append("| corpus | train | val | test |")
-        p.append("|---|---:|---:|---:|")
-        # Build dict {corpus: {split: count}}
-        cs: dict[str, dict[str, int]] = {}
-        for k, v in spk_per_cs.items():
-            ds, _, sp = k.partition(":")
-            cs.setdefault(ds, {})[sp] = int(v)
-        for ds in sorted(cs):
-            row = [f"`{ds}`"] + [_fmt_int(cs[ds].get(s, 0)) for s in SPLITS]
-            p.append("| " + " | ".join(row) + " |")
-    p.append("")
-
-    # Drops
-    if dropped:
-        p.append("## Drop accounting (per corpus)\n")
-        p.append("| corpus | source rows | loaded | assigned | aug policy | aug → train | drop reasons |")
-        p.append("|---|---:|---:|---:|---|---:|---|")
-        for ds, info in dropped.items():
-            info = info or {}
-            reasons = info.get("reasons", {}) or {}
-            reasons_s = "; ".join(f"{k}={v}" for k, v in reasons.items()) or "—"
-            p.append(
-                f"| `{ds}` | {_fmt_int(info.get('source_rows', 0))} | "
-                f"{_fmt_int(info.get('loaded', 0))} | {_fmt_int(info.get('assigned', 0))} | "
-                f"`{info.get('augmented_policy', '—')}` | "
-                f"{_fmt_int(info.get('aug_added_to_train', 0))} | {reasons_s} |"
-            )
-        p.append("")
-
-    # Leak / integrity
-    p.append("## Integrity\n")
-    p.append(f"- Speaker-disjoint splits: `{summary.get('speaker_disjoint')}`")
-    p.append(f"- Stratify by: `{summary.get('stratify_by')}`")
-    p.append(f"- Augmentation leak check: **{'passed' if leak.get('passed') else 'FAILED'}** "
-             f"({leak.get('total_violations', 0)} violations)")
-    pol = leak.get("policy_per_corpus", {}) or {}
-    if pol:
-        pol_s = "; ".join(
-            f"`{ds}`→{splits if splits else '∅'}" for ds, splits in pol.items()
-        )
-        p.append(f"- Aug allowed splits per corpus: {pol_s}")
     p.append("")
 
     # Schema
@@ -450,20 +428,10 @@ def _build_card(
     p.append("- `gender` — `M` / `F` / null")
     p.append("- `age_category` — child / young / adult / senior / null")
     p.append("- `source_dataset` — origin corpus key (e.g. `batch01`, `batch02`, `kazemo`, `kazattsd`)")
-    p.append("- `source_row_id` — stable id within the source corpus")
-    p.append("- `source_index` — row index in the source HF split")
+    p.append("- `source_row_id` — stable id within the source corpus (original utterance / file id)")
+    p.append("- `source_index` — row index in the source HF split (round-trip back to origin)")
     p.append("- `speaker_id` — speaker key (when known)")
     p.append("- `augmented` — true if this row is a synthetic / augmented copy")
-    p.append("")
-
-    # Provenance
-    p.append("## Build provenance\n")
-    p.append(f"- Builder seed: `{seed}`")
-    if git_sha:
-        p.append(f"- Repo commit: `{git_sha}`")
-    if cfg_sha:
-        p.append(f"- Config sha256: `{cfg_sha}`")
-    p.append("- Auditable artifacts under `build/`: `config.yaml`, `summary.json`")
     p.append("")
     return "\n".join(p)
 
@@ -500,6 +468,7 @@ def main() -> int:
 
     summary = json.loads(summary_path.read_text())
     config = yaml.safe_load(config_path.read_text()) or {}
+    slim = _slim_summary(summary)
 
     dd = load_split_as_hf_dataset(split_dir, with_provenance=not args.no_provenance)
     print(f"[push] built DatasetDict (provenance={'off' if args.no_provenance else 'on'}):")
@@ -512,14 +481,8 @@ def main() -> int:
 
     api = HfApi()
     api.upload_file(
-        path_or_fileobj=str(config_path),
-        path_in_repo="build/config.yaml",
-        repo_id=args.repo_id,
-        repo_type="dataset",
-    )
-    api.upload_file(
-        path_or_fileobj=str(summary_path),
-        path_in_repo="build/summary.json",
+        path_or_fileobj=json.dumps(slim, indent=2).encode("utf-8"),
+        path_in_repo="summary.json",
         repo_id=args.repo_id,
         repo_type="dataset",
     )
@@ -527,7 +490,7 @@ def main() -> int:
     if not args.no_card:
         with tempfile.TemporaryDirectory() as td:
             fig_dir = Path(td) / "figures"
-            figures = _generate_figures(summary, fig_dir)
+            figures = _generate_figures(slim, fig_dir)
             for key, path in figures.items():
                 api.upload_file(
                     path_or_fileobj=str(path),
@@ -536,7 +499,7 @@ def main() -> int:
                     repo_type="dataset",
                 )
                 print(f"[push] uploaded figure: figures/{path.name}")
-            card = _build_card(summary, config, args.repo_id, figures=figures)
+            card = _build_card(slim, config, args.repo_id, figures=figures)
             api.upload_file(
                 path_or_fileobj=card.encode("utf-8"),
                 path_in_repo="README.md",
