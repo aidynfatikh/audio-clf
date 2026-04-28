@@ -18,6 +18,11 @@ if str(_REPO_ROOT) not in sys.path:
 
 os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 os.environ["TORCHCODEC_QUIET"] = "1"
+os.environ.setdefault(
+    "GRADIO_TEMP_DIR",
+    str(Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "gradio"),
+)
+Path(os.environ["GRADIO_TEMP_DIR"]).mkdir(parents=True, exist_ok=True)
 
 import numpy as np
 import gradio as gr
